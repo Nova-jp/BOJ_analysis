@@ -9,13 +9,14 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from sklearn.linear_model import BayesianRidge
 
-# ポップアップを防ぎ、PDFエンコードエラーを回避するための設定
+# Disable popup and set PDF settings
 import matplotlib
 matplotlib.use('Agg')
-plt.rcParams['pdf.fonttype'] = 42  # TrueTypeフォントの埋め込み
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['font.family'] = 'DejaVu Sans'
 
 # ==========================================
-# 1. データ処理・特徴量生成ロジック (Internal)
+# 1. Processing Logic
 # ==========================================
 
 def frac_diff_func(series, d, window=50):
@@ -34,14 +35,13 @@ def get_frac_diff_weights(d, window):
 def load_and_clean_data(excel_path, meeting_csv_path):
     df_raw = pd.read_excel(excel_path)
     df = df_raw.iloc[1:].copy()
-    # 列名のクリーニング
     if '日付' in df.columns:
         df['Date_Raw'] = pd.to_datetime(df['日付'], format='%Y年%m月%d日', errors='coerce')
         df = df.sort_values('Date_Raw').reset_index(drop=True)
     else:
-        # 代替案: 最初の列を日付とみなす
         df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0], errors='coerce')
         df = df.sort_values(df.columns[0]).reset_index(drop=True)
+        df['Date_Raw'] = df.iloc[:, 0]
 
     rename_dict = {
         'JPBOJ1ONI=TRDT (MID_PRICE)': 'M1', 'JPBOJ2ONI=TRDT (MID_PRICE)': 'M2',
@@ -52,8 +52,6 @@ def load_and_clean_data(excel_path, meeting_csv_path):
         '.N225 (TRDPRC_1)': 'Nikkei225', '.DXY (TRDPRC_1)': 'DXY'
     }
     df = df.rename(columns=rename_dict)
-    
-    # 不要な列の削除
     cols_to_drop = [c for c in df.columns if 'JPY1DOIS' in c or '日付' in c]
     df = df.drop(columns=cols_to_drop)
 
@@ -84,14 +82,12 @@ def pool_boj_data(df, mpm_dates, d=0.4, window=50, max_n=5):
     df = df.copy()
     boj_cols = [f'M{i}' for i in range(1, 9)]
     weights = get_frac_diff_weights(d, window)
-    
     ext_cols = ['JGB_Future', 'USDJPY', 'Nikkei225', 'JPY_Effective']
     common_feats = []
     for col in ext_cols:
         if col in df.columns:
             df[f'{col}_FracDiff'] = frac_diff_func(df[col], d=d, window=window)
             common_feats.append(f'{col}_FracDiff')
-            
     for i in range(1, 9):
         c = f'M{i}_is_imputed'
         if c in df.columns:
@@ -118,124 +114,104 @@ def pool_boj_data(df, mpm_dates, d=0.4, window=50, max_n=5):
     return pooled.drop(columns=['M_Label'])
 
 # ==========================================
-# 2. メイン分析プロセス
+# 2. Main Analysis and Strategy Plotting
 # ==========================================
 
 def run_full_analysis():
     print("Starting Analysis Process...")
     sns.set_theme(style='whitegrid')
-    # 英語フォントを優先してエラー回避
-    plt.rcParams['font.family'] = 'DejaVu Sans'
-
     if not os.path.exists('outputs'): os.makedirs('outputs')
     pdf_path = 'outputs/analysis_report.pdf'
 
-    # データロード
+    # Load Data
     MAX_N = 5
     df_cleaned = load_and_clean_data('data/BOJ_data.xlsx', 'data/BOJ_meeting_history.csv')
     mpm_dates = pd.to_datetime(pd.read_csv('data/BOJ_meeting_history.csv')['Date'])
     df_pooled = pool_boj_data(df_cleaned, mpm_dates=mpm_dates, max_n=MAX_N)
 
-    # 特徴量準備
+    # Features and Split
     features = [c for c in df_pooled.columns if 'FracDiff' in c or 'Consec_Imp' in c or c in ['Days_to_MPM', 'Meeting_Index']]
     train_final = df_pooled.dropna(subset=[f'Target_FD_{MAX_N}d'] + features)
     split_date = sorted(train_final['Date'].unique())[int(len(train_final['Date'].unique()) * 0.8)]
     test_df = df_pooled[df_pooled['Date'] >= split_date].copy()
 
-    # 学習 & 予測
-    models = {}
-    print(f"Training models for horizons n=[1, 3, 5]...")
+    # Model Training and Prediction for all M-Indices
+    print("Training models for all Meeting Indices...")
     for n in [1, 3, 5]:
         m = CatBoostRegressor(iterations=800, learning_rate=0.05, verbose=0, random_seed=42)
         m.fit(train_final[train_final['Date'] < split_date][features], 
               train_final[train_final['Date'] < split_date][f'Target_FD_{n}d'])
         test_df[f'Pred_Rate_{n}d'] = m.predict(test_df[features]) - test_df[f'Mem_{n}d'].ffill()
-        models[n] = m
 
-    with PdfPages(pdf_path) as pdf:
-        print(f"Generating PDF report: {pdf_path}")
-
-        # --- 1. M1 to M8 Levels (8 graphs, 2 pages) ---
-        for p in range(2):
-            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-            for i, ax in enumerate(axes.flatten()):
-                m_idx = p * 4 + i + 1
-                col = f'M{m_idx}'
-                ax.plot(df_cleaned['Date'], df_cleaned[col], color='darkblue')
-                ax.set_title(f'{col} Level')
-            plt.tight_layout()
-            pdf.savefig(fig); plt.close(fig)
-
-        # --- 2. Adjacent Spreads (M2-M1...M8-M7 / 7 graphs, 2 pages) ---
-        adj_pairs = [(f'M{i+1}', f'M{i}') for i in range(1, 8)]
-        for p in range(2):
-            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-            for i, ax in enumerate(axes.flatten()):
-                idx = p * 4 + i
-                if idx < len(adj_pairs):
-                    m_high, m_low = adj_pairs[idx]
-                    ax.plot(df_cleaned['Date'], df_cleaned[m_high] - df_cleaned[m_low], color='darkred')
-                    ax.set_title(f'Spread {m_high}-{m_low}')
-                else:
-                    ax.axis('off')
-            plt.tight_layout()
-            pdf.savefig(fig); plt.close(fig)
-
-        # --- 3. All Curve Spreads (Gaps >= 2) ---
-        curve_pairs = []
-        for gap in range(2, 8):
-            for i in range(1, 9 - gap):
-                curve_pairs.append((f'M{i+gap}', f'M{i}'))
+    # Helper to plot a strategy block
+    def plot_strategy_block(ax_price, ax_pnl, df_series, title):
+        df = df_series.copy().sort_values('Date')
+        df['Pred_1d_lag1'] = df['Pred_Rate_1d'].shift(1)
         
-        for i in range(0, len(curve_pairs), 4):
-            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-            for j, ax in enumerate(axes.flatten()):
-                idx = i + j
-                if idx < len(curve_pairs):
-                    m_high, m_low = curve_pairs[idx]
-                    ax.plot(df_cleaned['Date'], df_cleaned[m_high] - df_cleaned[m_low], color='purple')
-                    ax.set_title(f'Curve Spread {m_high}-{m_low}')
-                else:
-                    ax.axis('off')
-            plt.tight_layout()
-            pdf.savefig(fig); plt.close(fig)
+        # Trend Logic
+        cond_short = (df['Pred_1d_lag1'] < df['Pred_Rate_1d']) & (df['Pred_Rate_1d'] < df['Pred_Rate_3d']) & (df['Pred_Rate_3d'] < df['Pred_Rate_5d'])
+        cond_long = (df['Pred_1d_lag1'] > df['Pred_Rate_1d']) & (df['Pred_Rate_1d'] > df['Pred_Rate_3d']) & (df['Pred_Rate_3d'] > df['Pred_Rate_5d'])
+        
+        df['Signal'] = 0
+        df.loc[cond_long, 'Signal'] = 1; df.loc[cond_short, 'Signal'] = -1
+        df['PnL'] = df['Signal'] * (df['Actual_Val'] - df['Actual_5d_Val'])
+        
+        # Plot Trajectory
+        ax_price.plot(df['Date'], df['Actual_Val'], color='black', linewidth=1.5, label='Actual')
+        colors = sns.color_palette("Reds", 3)
+        for i, n in enumerate([1, 3, 5]):
+            ax_price.plot(df['Date'], df[f'Pred_Rate_{n}d'].shift(n), linestyle='--', color=colors[i], alpha=0.5, linewidth=0.8)
+        
+        longs = df[df['Signal'] == 1]; shorts = df[df['Signal'] == -1]
+        ax_price.scatter(longs['Date'], longs['Actual_Val'], marker='^', color='blue', s=40, zorder=5)
+        ax_price.scatter(shorts['Date'], shorts['Actual_Val'], marker='v', color='red', s=40, zorder=5)
+        ax_price.set_title(title, fontsize=10)
+        ax_price.tick_params(axis='both', which='major', labelsize=8)
+        
+        # Plot Cumulative PnL
+        ax_pnl.plot(df['Date'], df['PnL'].fillna(0).cumsum(), color='green', linewidth=1)
+        ax_pnl.fill_between(df['Date'], 0, df['PnL'].fillna(0).cumsum(), color='green', alpha=0.1)
+        ax_pnl.set_ylabel('CumPnL', fontsize=8)
+        ax_pnl.tick_params(axis='both', which='major', labelsize=8)
 
-        # --- 4. Strategy Results (Trajectory & PnL for M1, M5) ---
-        for m_idx in [1, 5]:
-            m_df = test_df[test_df['Meeting_Index'] == m_idx].copy().sort_values('Date')
-            m_df['Pred_1d_lag1'] = m_df['Pred_Rate_1d'].shift(1)
-            cond_short = (m_df['Pred_1d_lag1'] < m_df['Pred_Rate_1d']) & (m_df['Pred_Rate_1d'] < m_df['Pred_Rate_3d']) & (m_df['Pred_Rate_3d'] < m_df['Pred_Rate_5d'])
-            cond_long = (m_df['Pred_1d_lag1'] > m_df['Pred_Rate_1d']) & (m_df['Pred_Rate_1d'] > m_df['Pred_Rate_3d']) & (m_df['Pred_Rate_3d'] > m_df['Pred_Rate_5d'])
-            m_df['Signal'] = 0
-            m_df.loc[cond_long, 'Signal'] = 1; m_df.loc[cond_short, 'Signal'] = -1
-            m_df['PnL'] = m_df['Signal'] * (m_df['Swap_Rate'] - m_df['Actual_5d'])
-            
-            latest_t = m_df[m_df['Swap_Rate'].notnull()]['Date'].max()
-            ext_dates = pd.bdate_range(start=latest_t + pd.Timedelta(days=1), periods=5)
-            df_ext = pd.concat([m_df, pd.DataFrame({'Date': ext_dates})], ignore_index=True).sort_values('Date')
-            
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), gridspec_kw={'height_ratios': [2, 1]}, sharex=True)
-            ax1.plot(df_ext['Date'], df_ext['Swap_Rate'], color='black', linewidth=3, label='Actual')
-            colors = sns.color_palette("Reds", 3)
-            for i, n in enumerate([1, 3, 5]):
-                ax1.plot(df_ext['Date'], df_ext[f'Pred_Rate_{n}d'].shift(n), label=f'Pred {n}d ago', linestyle='--', color=colors[i], alpha=0.7)
-            longs = df_ext[df_ext['Signal'] == 1]; shorts = df_ext[df_ext['Signal'] == -1]
-            ax1.scatter(longs['Date'], longs['Swap_Rate'], marker='^', color='blue', s=100, label='Long(Recv)', zorder=5)
-            ax1.scatter(shorts['Date'], shorts['Swap_Rate'], marker='v', color='red', s=100, label='Short(Pay)', zorder=5)
-            ax1.set_title(f'M{m_idx} Trajectory and Signals', fontsize=16); ax1.legend(bbox_to_anchor=(1.05, 1))
-            ax2.plot(df_ext['Date'], df_ext['PnL'].fillna(0).cumsum(), color='green', linewidth=2)
-            ax2.fill_between(df_ext['Date'], 0, df_ext['PnL'].fillna(0).cumsum(), color='green', alpha=0.1)
-            ax2.set_title(f'M{m_idx} Cumulative PnL (5d Unwind)', fontsize=13)
-            plt.tight_layout()
-            pdf.savefig(fig); plt.close(fig)
+    # Collect items to plot
+    plot_items = []
+    # Levels M1-M8
+    for i in range(1, 9):
+        m_df = test_df[test_df['Meeting_Index'] == i].copy()
+        m_df = m_df.rename(columns={'Swap_Rate': 'Actual_Val', 'Actual_5d': 'Actual_5d_Val'})
+        plot_items.append((f'M{i} Strategy', m_df))
+    # Adjacent Spreads
+    for i in range(1, 8):
+        m_hi = test_df[test_df['Meeting_Index'] == i+1].set_index('Date')
+        m_lo = test_df[test_df['Meeting_Index'] == i].set_index('Date')
+        s_df = (m_hi - m_lo).reset_index()
+        s_df = s_df.rename(columns={'Swap_Rate': 'Actual_Val', 'Actual_5d': 'Actual_5d_Val'})
+        plot_items.append((f'Spread M{i+1}-M{i}', s_df))
+    # All Curve Spreads
+    for gap in range(2, 8):
+        for i in range(1, 9 - gap):
+            m_hi = test_df[test_df['Meeting_Index'] == i+gap].set_index('Date')
+            m_lo = test_df[test_df['Meeting_Index'] == i].set_index('Date')
+            s_df = (m_hi - m_lo).reset_index()
+            s_df = s_df.rename(columns={'Swap_Rate': 'Actual_Val', 'Actual_5d': 'Actual_5d_Val'})
+            plot_items.append((f'Curve M{i+gap}-M{i}', s_df))
 
-        # --- 5. Feature Importance ---
-        imp_df = pd.DataFrame({'Feature': features, 'Importance': models[5].get_feature_importance()}).sort_values('Importance', ascending=False)
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.barplot(data=imp_df.head(20), x='Importance', y='Feature', palette='viridis', ax=ax)
-        ax.set_title('Top 20 Feature Importance (n=5d Model)')
-        plt.tight_layout()
-        pdf.savefig(fig); plt.close(fig)
+    # PDF Generation
+    with PdfPages(pdf_path) as pdf:
+        print(f"Generating PDF: {pdf_path}")
+        for i in range(0, len(plot_items), 4):
+            fig = plt.figure(figsize=(12, 16))
+            gs = fig.add_gridspec(2, 2, hspace=0.3, wspace=0.2)
+            for j in range(4):
+                if i + j >= len(plot_items): break
+                title, data = plot_items[i+j]
+                # Subgrid for each block (Price top, PnL bottom)
+                sub_gs = gs[j // 2, j % 2].subgridspec(2, 1, height_ratios=[2, 1], hspace=0.1)
+                ax1 = fig.add_subplot(sub_gs[0])
+                ax2 = fig.add_subplot(sub_gs[1], sharex=ax1)
+                plot_strategy_block(ax1, ax2, data, title)
+            pdf.savefig(fig); plt.close(fig)
 
     print(f"Analysis complete. Report saved as {pdf_path}")
 
