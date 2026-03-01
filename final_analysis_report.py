@@ -3,10 +3,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+from matplotlib.backends.backend_pdf import PdfPages
 from catboost import CatBoostRegressor
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from sklearn.linear_model import BayesianRidge
+
+# ポップアップを防ぐためのバックエンド設定
+import matplotlib
+matplotlib.use('Agg')
 
 # ==========================================
 # 1. データ処理・特徴量生成ロジック (Internal)
@@ -114,6 +119,9 @@ def run_full_analysis():
     if not any(f in plt.rcParams['font.family'] for f in ['Hiragino Sans', 'MS Gothic', 'sans-serif']):
         plt.rcParams['font.family'] = 'sans-serif'
 
+    if not os.path.exists('outputs'): os.makedirs('outputs')
+    pdf_path = 'outputs/analysis_report.pdf'
+
     # データロード
     MAX_N = 5
     df_cleaned = load_and_clean_data('data/BOJ_data.xlsx', 'data/BOJ_meeting_history.csv')
@@ -136,61 +144,92 @@ def run_full_analysis():
         test_df[f'Pred_Rate_{n}d'] = m.predict(test_df[features]) - test_df[f'Mem_{n}d'].ffill()
         models[n] = m
 
-    # 重要度の出力
-    print("
-[Feature Importance (n=5d Model)]")
-    imp_df = pd.DataFrame({'Feature': features, 'Importance': models[5].get_feature_importance()}).sort_values('Importance', ascending=False)
-    print(imp_df.head(15))
-    
-    plt.figure(figsize=(10, 8))
-    sns.barplot(data=imp_df.head(20), x='Importance', y='Feature', palette='viridis')
-    plt.title('Top 20 Feature Importance (n=5d Model)')
-    plt.tight_layout()
-    plt.savefig('outputs/feature_importance.png')
-    plt.show()
+    with PdfPages(pdf_path) as pdf:
+        print(f"Generating PDF report: {pdf_path}")
 
-    # トレンド戦略 & グラフ出力
-    def plot_analysis(df, title):
-        df = df.copy().sort_values('Date')
-        df['Pred_1d_lag1'] = df['Pred_Rate_1d'].shift(1)
+        # --- 1. M1 to M8 Levels (8 graphs, 2 pages) ---
+        for p in range(2):
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            for i, ax in enumerate(axes.flatten()):
+                m_idx = p * 4 + i + 1
+                col = f'M{m_idx}'
+                ax.plot(df_cleaned['Date'], df_cleaned[col], color='darkblue')
+                ax.set_title(f'{col} Level')
+            plt.tight_layout()
+            pdf.savefig(fig); plt.close(fig)
+
+        # --- 2. Adjacent Spreads (M2-M1...M8-M7 / 7 graphs, 2 pages) ---
+        adj_pairs = [(f'M{i+1}', f'M{i}') for i in range(1, 8)]
+        for p in range(2):
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            for i, ax in enumerate(axes.flatten()):
+                idx = p * 4 + i
+                if idx < len(adj_pairs):
+                    m_high, m_low = adj_pairs[idx]
+                    ax.plot(df_cleaned['Date'], df_cleaned[m_high] - df_cleaned[m_low], color='darkred')
+                    ax.set_title(f'Spread {m_high}-{m_low}')
+                else:
+                    ax.axis('off')
+            plt.tight_layout()
+            pdf.savefig(fig); plt.close(fig)
+
+        # --- 3. All Curve Spreads (Gaps >= 2) ---
+        curve_pairs = []
+        for gap in range(2, 8):
+            for i in range(1, 9 - gap):
+                curve_pairs.append((f'M{i+gap}', f'M{i}'))
         
-        # Trend-Following Strategy
-        cond_short = (df['Pred_1d_lag1'] < df['Pred_Rate_1d']) & (df['Pred_Rate_1d'] < df['Pred_Rate_3d']) & (df['Pred_Rate_3d'] < df['Pred_Rate_5d'])
-        cond_long = (df['Pred_1d_lag1'] > df['Pred_Rate_1d']) & (df['Pred_Rate_1d'] > df['Pred_Rate_3d']) & (df['Pred_Rate_3d'] > df['Pred_Rate_5d'])
-        
-        df['Signal'] = 0
-        df.loc[cond_long, 'Signal'] = 1   # Long (Recv)
-        df.loc[cond_short, 'Signal'] = -1  # Short (Pay)
-        df['PnL'] = df['Signal'] * (df['Swap_Rate'] - df['Actual_5d'])
-        
-        latest_t = df[df['Swap_Rate'].notnull()]['Date'].max()
-        ext_dates = pd.bdate_range(start=latest_t + pd.Timedelta(days=1), periods=5)
-        df_ext = pd.concat([df, pd.DataFrame({'Date': ext_dates})], ignore_index=True).sort_values('Date')
-        
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), gridspec_kw={'height_ratios': [2, 1]}, sharex=True)
-        ax1.plot(df_ext['Date'], df_ext['Swap_Rate'], color='black', linewidth=3, label='Actual')
-        colors = sns.color_palette("Reds", 3)
-        for i, n in enumerate([1, 3, 5]):
-            ax1.plot(df_ext['Date'], df_ext[f'Pred_Rate_{n}d'].shift(n), label=f'Pred {n}d ago', linestyle='--', color=colors[i], alpha=0.7)
-        
-        longs = df_ext[df_ext['Signal'] == 1]; shorts = df_ext[df_ext['Signal'] == -1]
-        ax1.scatter(longs['Date'], longs['Swap_Rate'], marker='^', color='blue', s=100, label='Long(Recv)', zorder=5)
-        ax1.scatter(shorts['Date'], shorts['Swap_Rate'], marker='v', color='red', s=100, label='Short(Pay)', zorder=5)
-        ax1.set_title(f'{title} Trajectory & Trend Signals', fontsize=16); ax1.legend(bbox_to_anchor=(1.05, 1))
-        
-        ax2.plot(df_ext['Date'], df_ext['PnL'].fillna(0).cumsum(), color='green', linewidth=2)
-        ax2.fill_between(df_ext['Date'], 0, df_ext['PnL'].fillna(0).cumsum(), color='green', alpha=0.1)
-        ax2.set_title(f'{title} Cumulative PnL (5d Unwind)', fontsize=13)
-        
+        for i in range(0, len(curve_pairs), 4):
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            for j, ax in enumerate(axes.flatten()):
+                idx = i + j
+                if idx < len(curve_pairs):
+                    m_high, m_low = curve_pairs[idx]
+                    ax.plot(df_cleaned['Date'], df_cleaned[m_high] - df_cleaned[m_low], color='purple')
+                    ax.set_title(f'Curve Spread {m_high}-{m_low}')
+                else:
+                    ax.axis('off')
+            plt.tight_layout()
+            pdf.savefig(fig); plt.close(fig)
+
+        # --- 4. Strategy Results (Trajectory & PnL for M1, M5) ---
+        for m_idx in [1, 5]:
+            m_df = test_df[test_df['Meeting_Index'] == m_idx].copy().sort_values('Date')
+            m_df['Pred_1d_lag1'] = m_df['Pred_Rate_1d'].shift(1)
+            cond_short = (m_df['Pred_1d_lag1'] < m_df['Pred_Rate_1d']) & (m_df['Pred_Rate_1d'] < m_df['Pred_Rate_3d']) & (m_df['Pred_Rate_3d'] < m_df['Pred_Rate_5d'])
+            cond_long = (m_df['Pred_1d_lag1'] > m_df['Pred_Rate_1d']) & (m_df['Pred_Rate_1d'] > m_df['Pred_Rate_3d']) & (m_df['Pred_Rate_3d'] > m_df['Pred_Rate_5d'])
+            m_df['Signal'] = 0
+            m_df.loc[cond_long, 'Signal'] = 1; m_df.loc[cond_short, 'Signal'] = -1
+            m_df['PnL'] = m_df['Signal'] * (m_df['Swap_Rate'] - m_df['Actual_5d'])
+            
+            latest_t = m_df[m_df['Swap_Rate'].notnull()]['Date'].max()
+            ext_dates = pd.bdate_range(start=latest_t + pd.Timedelta(days=1), periods=5)
+            df_ext = pd.concat([m_df, pd.DataFrame({'Date': ext_dates})], ignore_index=True).sort_values('Date')
+            
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), gridspec_kw={'height_ratios': [2, 1]}, sharex=True)
+            ax1.plot(df_ext['Date'], df_ext['Swap_Rate'], color='black', linewidth=3, label='Actual')
+            colors = sns.color_palette("Reds", 3)
+            for i, n in enumerate([1, 3, 5]):
+                ax1.plot(df_ext['Date'], df_ext[f'Pred_Rate_{n}d'].shift(n), label=f'Pred {n}d ago', linestyle='--', color=colors[i], alpha=0.7)
+            longs = df_ext[df_ext['Signal'] == 1]; shorts = df_ext[df_ext['Signal'] == -1]
+            ax1.scatter(longs['Date'], longs['Swap_Rate'], marker='^', color='blue', s=100, label='Long(Recv)', zorder=5)
+            ax1.scatter(shorts['Date'], shorts['Swap_Rate'], marker='v', color='red', s=100, label='Short(Pay)', zorder=5)
+            ax1.set_title(f'M{m_idx} Trajectory & Trend Signals', fontsize=16); ax1.legend(bbox_to_anchor=(1.05, 1))
+            ax2.plot(df_ext['Date'], df_ext['PnL'].fillna(0).cumsum(), color='green', linewidth=2)
+            ax2.fill_between(df_ext['Date'], 0, df_ext['PnL'].fillna(0).cumsum(), color='green', alpha=0.1)
+            ax2.set_title(f'M{m_idx} Cumulative PnL (5d Unwind)', fontsize=13)
+            plt.tight_layout()
+            pdf.savefig(fig); plt.close(fig)
+
+        # --- 5. Feature Importance ---
+        imp_df = pd.DataFrame({'Feature': features, 'Importance': models[5].get_feature_importance()}).sort_values('Importance', ascending=False)
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.barplot(data=imp_df.head(20), x='Importance', y='Feature', palette='viridis', ax=ax)
+        ax.set_title('Top 20 Feature Importance (n=5d Model)')
         plt.tight_layout()
-        plt.savefig(f'outputs/strategy_result_{title}.png')
-        plt.show()
-        return df_ext
+        pdf.savefig(fig); plt.close(fig)
 
-    if not os.path.exists('outputs'): os.makedirs('outputs')
-    m1_res = plot_analysis(test_df[test_df['Meeting_Index'] == 1], 'M1')
-    m5_res = plot_analysis(test_df[test_df['Meeting_Index'] == 5], 'M5')
-    print("Analysis complete. Graphs saved in 'outputs/' directory.")
+    print(f"Analysis complete. Report saved as {pdf_path}")
 
 if __name__ == "__main__":
     run_full_analysis()
