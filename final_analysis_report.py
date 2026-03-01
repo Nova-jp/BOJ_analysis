@@ -9,9 +9,10 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from sklearn.linear_model import BayesianRidge
 
-# ポップアップを防ぐためのバックエンド設定
+# ポップアップを防ぎ、PDFエンコードエラーを回避するための設定
 import matplotlib
 matplotlib.use('Agg')
+plt.rcParams['pdf.fonttype'] = 42  # TrueTypeフォントの埋め込み
 
 # ==========================================
 # 1. データ処理・特徴量生成ロジック (Internal)
@@ -33,8 +34,14 @@ def get_frac_diff_weights(d, window):
 def load_and_clean_data(excel_path, meeting_csv_path):
     df_raw = pd.read_excel(excel_path)
     df = df_raw.iloc[1:].copy()
-    df['日付'] = pd.to_datetime(df['日付'], format='%Y年%m月%d日')
-    df = df.sort_values('日付').reset_index(drop=True)
+    # 列名のクリーニング
+    if '日付' in df.columns:
+        df['Date_Raw'] = pd.to_datetime(df['日付'], format='%Y年%m月%d日', errors='coerce')
+        df = df.sort_values('Date_Raw').reset_index(drop=True)
+    else:
+        # 代替案: 最初の列を日付とみなす
+        df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0], errors='coerce')
+        df = df.sort_values(df.columns[0]).reset_index(drop=True)
 
     rename_dict = {
         'JPBOJ1ONI=TRDT (MID_PRICE)': 'M1', 'JPBOJ2ONI=TRDT (MID_PRICE)': 'M2',
@@ -45,17 +52,19 @@ def load_and_clean_data(excel_path, meeting_csv_path):
         '.N225 (TRDPRC_1)': 'Nikkei225', '.DXY (TRDPRC_1)': 'DXY'
     }
     df = df.rename(columns=rename_dict)
-    if 'JPY1DOIS=ICAP (MID_PRICE)' in df.columns:
-        df = df.drop(columns=['JPY1DOIS=ICAP (MID_PRICE)'])
+    
+    # 不要な列の削除
+    cols_to_drop = [c for c in df.columns if 'JPY1DOIS' in c or '日付' in c]
+    df = df.drop(columns=cols_to_drop)
 
-    numeric_cols = df.columns.drop('日付')
+    numeric_cols = df.columns.drop('Date_Raw')
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     
     df['JPY_Effective'] = df['DXY'] / df['USDJPY']
     df_meetings = pd.read_csv(meeting_csv_path)
     df_meetings['Date'] = pd.to_datetime(df_meetings['Date'])
-    df = pd.merge(df, df_meetings, left_on='日付', right_on='Date', how='left')
+    df = pd.merge(df, df_meetings, left_on='Date_Raw', right_on='Date', how='left')
     df['Is_Meeting_Day'] = df['Event'].notnull().astype(int)
     df['Actual_Policy_Rate'] = df['Policy_Rate'].ffill()
 
@@ -68,8 +77,8 @@ def load_and_clean_data(excel_path, meeting_csv_path):
     imputer = IterativeImputer(estimator=BayesianRidge(), max_iter=20, random_state=42)
     df.loc[:, available_cols] = imputer.fit_transform(df[available_cols])
 
-    df['Date'] = pd.to_datetime(df['日付'])
-    return df.drop(columns=['日付'])
+    df['Date'] = df['Date_Raw']
+    return df.drop(columns=['Date_Raw'])
 
 def pool_boj_data(df, mpm_dates, d=0.4, window=50, max_n=5):
     df = df.copy()
@@ -115,9 +124,8 @@ def pool_boj_data(df, mpm_dates, d=0.4, window=50, max_n=5):
 def run_full_analysis():
     print("Starting Analysis Process...")
     sns.set_theme(style='whitegrid')
-    plt.rcParams['font.family'] = 'Hiragino Sans' # Mac
-    if not any(f in plt.rcParams['font.family'] for f in ['Hiragino Sans', 'MS Gothic', 'sans-serif']):
-        plt.rcParams['font.family'] = 'sans-serif'
+    # 英語フォントを優先してエラー回避
+    plt.rcParams['font.family'] = 'DejaVu Sans'
 
     if not os.path.exists('outputs'): os.makedirs('outputs')
     pdf_path = 'outputs/analysis_report.pdf'
@@ -214,7 +222,7 @@ def run_full_analysis():
             longs = df_ext[df_ext['Signal'] == 1]; shorts = df_ext[df_ext['Signal'] == -1]
             ax1.scatter(longs['Date'], longs['Swap_Rate'], marker='^', color='blue', s=100, label='Long(Recv)', zorder=5)
             ax1.scatter(shorts['Date'], shorts['Swap_Rate'], marker='v', color='red', s=100, label='Short(Pay)', zorder=5)
-            ax1.set_title(f'M{m_idx} Trajectory & Trend Signals', fontsize=16); ax1.legend(bbox_to_anchor=(1.05, 1))
+            ax1.set_title(f'M{m_idx} Trajectory and Signals', fontsize=16); ax1.legend(bbox_to_anchor=(1.05, 1))
             ax2.plot(df_ext['Date'], df_ext['PnL'].fillna(0).cumsum(), color='green', linewidth=2)
             ax2.fill_between(df_ext['Date'], 0, df_ext['PnL'].fillna(0).cumsum(), color='green', alpha=0.1)
             ax2.set_title(f'M{m_idx} Cumulative PnL (5d Unwind)', fontsize=13)
