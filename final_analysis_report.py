@@ -89,6 +89,7 @@ def pool_boj_data(df, mpm_dates, d=0.4, window=50, max_n=5):
             df[f'{col}_FracDiff'] = frac_diff_func(df[col], d=d, window=window)
             common_feats.append(f'{col}_FracDiff')
     for i in range(1, 9):
+        c = f'M{i}_is_is_imputed' # Dummy check
         c = f'M{i}_is_imputed'
         if c in df.columns:
             df[f'M{i}_Consec_Imp'] = df[c].groupby((df[c] != df[c].shift()).cumsum()).cumcount() + 1 * df[c]
@@ -135,8 +136,8 @@ def run_full_analysis():
     split_date = sorted(train_final['Date'].unique())[int(len(train_final['Date'].unique()) * 0.8)]
     test_df = df_pooled[df_pooled['Date'] >= split_date].copy()
 
-    # Model Training and Prediction for all M-Indices
-    print("Training models for all Meeting Indices...")
+    # Model Training and Prediction
+    print("Training models...")
     for n in [1, 3, 5]:
         m = CatBoostRegressor(iterations=800, learning_rate=0.05, verbose=0, random_seed=42)
         m.fit(train_final[train_final['Date'] < split_date][features], 
@@ -144,73 +145,68 @@ def run_full_analysis():
         test_df[f'Pred_Rate_{n}d'] = m.predict(test_df[features]) - test_df[f'Mem_{n}d'].ffill()
 
     # Helper to plot a strategy block
-    def plot_strategy_block(ax_price, ax_pnl, df_series, title):
+    def plot_strategy_block(ax, df_series, title):
         df = df_series.copy().sort_values('Date')
         df['Pred_1d_lag1'] = df['Pred_Rate_1d'].shift(1)
         
-        # Trend Logic
+        # Signals
         cond_short = (df['Pred_1d_lag1'] < df['Pred_Rate_1d']) & (df['Pred_Rate_1d'] < df['Pred_Rate_3d']) & (df['Pred_Rate_3d'] < df['Pred_Rate_5d'])
         cond_long = (df['Pred_1d_lag1'] > df['Pred_Rate_1d']) & (df['Pred_Rate_1d'] > df['Pred_Rate_3d']) & (df['Pred_Rate_3d'] > df['Pred_Rate_5d'])
-        
         df['Signal'] = 0
         df.loc[cond_long, 'Signal'] = 1; df.loc[cond_short, 'Signal'] = -1
-        df['PnL'] = df['Signal'] * (df['Actual_Val'] - df['Actual_5d_Val'])
+        
+        # Future Extension
+        latest_t = df[df['Actual_Val'].notnull()]['Date'].max()
+        ext_dates = pd.bdate_range(start=latest_t + pd.Timedelta(days=1), periods=5)
+        df_ext = pd.concat([df, pd.DataFrame({'Date': ext_dates})], ignore_index=True).sort_values('Date')
         
         # Plot Trajectory
-        ax_price.plot(df['Date'], df['Actual_Val'], color='black', linewidth=1.5, label='Actual')
+        ax.plot(df_ext['Date'], df_ext['Actual_Val'], color='black', linewidth=1.5, label='Actual')
         colors = sns.color_palette("Reds", 3)
         for i, n in enumerate([1, 3, 5]):
-            ax_price.plot(df['Date'], df[f'Pred_Rate_{n}d'].shift(n), linestyle='--', color=colors[i], alpha=0.5, linewidth=0.8)
+            line_data = df_ext[f'Pred_Rate_{n}d'].shift(n)
+            # Find the last non-NaN index to place a circle
+            last_idx = line_data.last_valid_index()
+            ax.plot(df_ext['Date'], line_data, linestyle='--', color=colors[i], alpha=0.6, linewidth=1.0)
+            if last_idx is not None:
+                ax.scatter(df_ext.loc[last_idx, 'Date'], line_data[last_idx], color=colors[i], s=30, zorder=6, edgecolors='white')
         
         longs = df[df['Signal'] == 1]; shorts = df[df['Signal'] == -1]
-        ax_price.scatter(longs['Date'], longs['Actual_Val'], marker='^', color='blue', s=40, zorder=5)
-        ax_price.scatter(shorts['Date'], shorts['Actual_Val'], marker='v', color='red', s=40, zorder=5)
-        ax_price.set_title(title, fontsize=10)
-        ax_price.tick_params(axis='both', which='major', labelsize=8)
-        
-        # Plot Cumulative PnL
-        ax_pnl.plot(df['Date'], df['PnL'].fillna(0).cumsum(), color='green', linewidth=1)
-        ax_pnl.fill_between(df['Date'], 0, df['PnL'].fillna(0).cumsum(), color='green', alpha=0.1)
-        ax_pnl.set_ylabel('CumPnL', fontsize=8)
-        ax_pnl.tick_params(axis='both', which='major', labelsize=8)
+        ax.scatter(longs['Date'], longs['Actual_Val'], marker='^', color='blue', s=40, zorder=5)
+        ax.scatter(shorts['Date'], shorts['Actual_Val'], marker='v', color='red', s=40, zorder=5)
+        ax.set_title(title, fontsize=11)
+        ax.tick_params(axis='both', which='major', labelsize=8)
 
     # Collect items to plot
     plot_items = []
-    # Levels M1-M8
     for i in range(1, 9):
         m_df = test_df[test_df['Meeting_Index'] == i].copy()
-        m_df = m_df.rename(columns={'Swap_Rate': 'Actual_Val', 'Actual_5d': 'Actual_5d_Val'})
-        plot_items.append((f'M{i} Strategy', m_df))
-    # Adjacent Spreads
+        m_df = m_df.rename(columns={'Swap_Rate': 'Actual_Val'})
+        plot_items.append((f'M{i} Analysis', m_df))
     for i in range(1, 8):
         m_hi = test_df[test_df['Meeting_Index'] == i+1].set_index('Date')
         m_lo = test_df[test_df['Meeting_Index'] == i].set_index('Date')
-        s_df = (m_hi - m_lo).reset_index()
-        s_df = s_df.rename(columns={'Swap_Rate': 'Actual_Val', 'Actual_5d': 'Actual_5d_Val'})
+        s_df = (m_hi - m_lo).reset_index().rename(columns={'Swap_Rate': 'Actual_Val'})
         plot_items.append((f'Spread M{i+1}-M{i}', s_df))
-    # All Curve Spreads
     for gap in range(2, 8):
         for i in range(1, 9 - gap):
             m_hi = test_df[test_df['Meeting_Index'] == i+gap].set_index('Date')
             m_lo = test_df[test_df['Meeting_Index'] == i].set_index('Date')
-            s_df = (m_hi - m_lo).reset_index()
-            s_df = s_df.rename(columns={'Swap_Rate': 'Actual_Val', 'Actual_5d': 'Actual_5d_Val'})
+            s_df = (m_hi - m_lo).reset_index().rename(columns={'Swap_Rate': 'Actual_Val'})
             plot_items.append((f'Curve M{i+gap}-M{i}', s_df))
 
     # PDF Generation
     with PdfPages(pdf_path) as pdf:
         print(f"Generating PDF: {pdf_path}")
         for i in range(0, len(plot_items), 4):
-            fig = plt.figure(figsize=(12, 16))
-            gs = fig.add_gridspec(2, 2, hspace=0.3, wspace=0.2)
-            for j in range(4):
-                if i + j >= len(plot_items): break
-                title, data = plot_items[i+j]
-                # Subgrid for each block (Price top, PnL bottom)
-                sub_gs = gs[j // 2, j % 2].subgridspec(2, 1, height_ratios=[2, 1], hspace=0.1)
-                ax1 = fig.add_subplot(sub_gs[0])
-                ax2 = fig.add_subplot(sub_gs[1], sharex=ax1)
-                plot_strategy_block(ax1, ax2, data, title)
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            for j, ax in enumerate(axes.flatten()):
+                if i + j < len(plot_items):
+                    title, data = plot_items[i+j]
+                    plot_strategy_block(ax, data, title)
+                else:
+                    ax.axis('off')
+            plt.tight_layout()
             pdf.savefig(fig); plt.close(fig)
 
     print(f"Analysis complete. Report saved as {pdf_path}")
