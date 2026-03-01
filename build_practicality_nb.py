@@ -1,0 +1,156 @@
+import json
+
+nb = {
+    "cells": [
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "# BOJ Swap Model Practicality Analysis\n",
+                "モデルの収益性、リスク、および信頼性を多角的に検証し、実運用への適応可能性を評価します。"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "import pandas as pd\n",
+                "import numpy as np\n",
+                "import matplotlib.pyplot as plt\n",
+                "import seaborn as sns\n",
+                "import sys\n",
+                "import os\n",
+                "from catboost import CatBoostRegressor\n",
+                "from sklearn.metrics import mean_squared_error\n",
+                "\n",
+                "if os.path.basename(os.getcwd()) == 'notebooks':\n",
+                "    os.chdir('..')\n",
+                "sys.path.append(os.getcwd())\n",
+                "\n",
+                "from src.processing import load_and_clean_data\n",
+                "from src.pooling import pool_boj_data\n",
+                "\n",
+                "sns.set_theme(style='whitegrid')\n",
+                "plt.rcParams['font.family'] = 'Hiragino Sans'\n",
+                "print(f\"Project Root: {os.getcwd()}\")"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": ["## 1. モデル予測の準備"]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "N_DAYS = 5\n",
+                "D_VAL = 0.4\n",
+                "df_cleaned = load_and_clean_data('data/BOJ_data.xlsx', 'data/BOJ_meeting_history.csv')\n",
+                "mpm_dates = pd.to_datetime(pd.read_csv('data/BOJ_meeting_history.csv')['Date'])\n",
+                "df_pooled = pool_boj_data(df_cleaned, mpm_dates=mpm_dates, d=D_VAL, n_days=N_DAYS)\n",
+                "\n",
+                "features = [\n",
+                "    'Swap_Rate_FracDiff', 'JGB_Future_FracDiff', 'USDJPY_FracDiff', 'Nikkei225_FracDiff', 'JPY_Effective_FracDiff',\n",
+                "    'Spread_M3_M1_FracDiff', 'Spread_M5_M1_FracDiff', 'Spread_M8_M5_FracDiff',\n",
+                "    'Days_to_Next_MPM', 'Meeting_Index', 'Is_Imputed', 'Consecutive_Imputed_Days'\n",
+                "]\n",
+                "target = 'Target_FracDiff_N_Day'\n",
+                "df_final = df_pooled.dropna(subset=[target, 'FracDiff_Memory_Component_N'] + features)\n",
+                "\n",
+                "split_date = sorted(df_final['日付'].unique())[int(len(df_final['日付'].unique()) * 0.8)]\n",
+                "train_df = df_final[df_final['日付'] < split_date]\n",
+                "test_df = df_final[df_final['日付'] >= split_date].copy()\n",
+                "\n",
+                "model = CatBoostRegressor(iterations=1000, learning_rate=0.03, depth=6, verbose=0, random_seed=42)\n",
+                "model.fit(train_df[features], train_df[target])\n",
+                "\n",
+                "test_df['Pred_Rate'] = model.predict(test_df[features]) - test_df['FracDiff_Memory_Component_N']\n",
+                "test_df['Actual_Move'] = test_df['Target_N_Day'] - test_df['Swap_Rate']\n",
+                "test_df['Pred_Move'] = test_df['Pred_Rate'] - test_df['Swap_Rate']"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": ["## 2. P&L (損益) シミュレーション\n", "予測方向に従ってポジションを持ち、n日後の変動幅を収益とするシミュレーションです。"]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "test_df['P_L'] = np.sign(test_df['Pred_Move']) * test_df['Actual_Move']\n",
+                "\n",
+                "plt.figure(figsize=(15, 8))\n",
+                "for idx in [1, 3, 5, 8]:\n",
+                "    subset = test_df[test_df['Meeting_Index'] == idx].sort_values('日付')\n",
+                "    plt.plot(subset['日付'], subset['P_L'].cumsum(), label=f'M{idx} Cumulative P&L')\n",
+                "\n",
+                "plt.title(f'Cumulative P&L Simulation ({N_DAYS}d ahead prediction)', fontsize=15)\n",
+                "plt.ylabel('Accumulated Yield Change (%)')\n",
+                "plt.legend()\n",
+                "plt.show()"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": ["## 3. 運用効率評価 (シャープレシオ)"]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "metrics = []\n",
+                "for idx in range(1, 9):\n",
+                "    subset = test_df[test_df['Meeting_Index'] == idx]\n",
+                "    mean_ret = subset['P_L'].mean()\n",
+                "    std_ret = subset['P_L'].std()\n",
+                "    sharpe = (mean_ret / std_ret) * np.sqrt(250 / N_DAYS) if std_ret > 0 else 0\n",
+                "    metrics.append({'Meeting': f'M{idx}', 'Sharpe_Ratio': sharpe, 'Avg_Ret': mean_ret, 'Total_Ret': subset['P_L'].sum()})\n",
+                "\n",
+                "display(pd.DataFrame(metrics))"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": ["## 4. 信頼度分析 (予測変動幅 vs 的中率)"]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "test_df['Pred_Move_Abs'] = test_df['Pred_Move'].abs()\n",
+                "test_df['Is_Hit'] = (np.sign(test_df['Pred_Move']) == np.sign(test_df['Actual_Move'])).astype(int)\n",
+                "\n",
+                "test_df['Confidence_Bin'] = pd.qcut(test_df['Pred_Move_Abs'], 5, labels=['Low', 'Mid-Low', 'Mid', 'High', 'Extreme'])\n",
+                "confidence_acc = test_df.groupby('Confidence_Bin', observed=True)['Is_Hit'].mean()\n",
+                "\n",
+                "plt.figure(figsize=(10, 6))\n",
+                "confidence_acc.plot(kind='bar', color='skyblue')\n",
+                "plt.axhline(0.5, color='red', linestyle='--')\n",
+                "plt.title('Prediction Confidence (Abs Pred Move) vs Accuracy')\n",
+                "plt.ylabel('Directional Accuracy')\n",
+                "plt.ylim(0, 1)\n",
+                "plt.show()"
+            ]
+        }
+    ],
+    "metadata": {"kernelspec": {"display_name": "Python 3", "name": "python3"}},
+    "nbformat": 4,
+    "nbformat_minor": 4,
+}
+
+with open('notebooks/05_model_practicality_analysis.ipynb', 'w', encoding='utf-8') as f:
+    json.dump(nb, f, indent=2, ensure_ascii=False)
