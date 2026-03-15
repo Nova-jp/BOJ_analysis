@@ -29,25 +29,33 @@ def generate_features(
 ):
     """
     設計仕様に基づき特徴量を生成する。
+
+    対象レート:
+      - M1〜M8: 会合先BOJスワップ（spread = レート - 政策金利）
+      - T12/T18/T24: テナーOIS（同様にspreadを計算）
     """
     feat_df = df.copy()
-    
-    # 1. M{n}_spread = M{n} - Actual_Policy_Rate
+
+    # 予測対象レートの一覧（存在するもののみ）
     boj_cols = [f'M{i}' for i in range(1, 9)]
-    for col in boj_cols:
+    tenor_cols = [c for c in ['T12', 'T18', 'T24'] if c in feat_df.columns]
+    all_rate_cols = boj_cols + tenor_cols
+
+    # 1. spread = レート - Actual_Policy_Rate
+    for col in all_rate_cols:
         feat_df[f'{col}_spread'] = feat_df[col] - feat_df['Actual_Policy_Rate']
-        
-    # 2. M{n}_frac_diff
-    for col in boj_cols:
+
+    # 2. frac_diff（spreadに対して適用）
+    for col in all_rate_cols:
         feat_df[f'{col}_frac_diff'] = frac_diff(feat_df[f'{col}_spread'], d=d, window=window)
-        
+
     # 3. 外部指標の分数階差
     ext_cols = ['USDJPY', 'JGB_Future', 'Nikkei225']
     for col in ext_cols:
-        feat_df[f'{col}_frac_diff'] = frac_diff(feat_df[col], d=d, window=window)
-        
+        if col in feat_df.columns:
+            feat_df[f'{col}_frac_diff'] = frac_diff(feat_df[col], d=d, window=window)
+
     # 4. Days_to_MPM: processing.py で計算済みの場合はそのまま使う
-    # （processing.py が未来の予定会合を含む CSV 全体から計算するため、こちらでは上書きしない）
     if 'Days_to_MPM' not in feat_df.columns:
         meeting_dates = sorted(feat_df.loc[feat_df['Is_Meeting_Day'] == 1, 'Date'].unique())
 
@@ -71,7 +79,7 @@ def generate_features(
         feat_df['Days_to_MPM_sin'] = np.sin(2 * np.pi * feat_df['Days_to_MPM'] / CYCLE)
         feat_df['Days_to_MPM_cos'] = np.cos(2 * np.pi * feat_df['Days_to_MPM'] / CYCLE)
 
-    # --- Exp-C: カーブ形状特徴量 ---
+    # --- Exp-C: カーブ形状特徴量（M1〜M8ベース） ---
     if add_curve_features:
         # 1. スロープ
         feat_df['Curve_Slope'] = feat_df['M8_spread'] - feat_df['M1_spread']
@@ -88,4 +96,3 @@ def generate_features(
             feat_df[f'{col}_frac_diff'] = frac_diff(feat_df[col], d=d, window=window)
 
     return feat_df
-

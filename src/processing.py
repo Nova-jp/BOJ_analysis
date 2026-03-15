@@ -7,7 +7,11 @@ from sklearn.linear_model import BayesianRidge
 def load_and_clean_data(excel_path, meeting_csv_path):
     """
     MICEを用いた補完、フラグ生成、および会合日フラグの作成を行う。
-    
+
+    対象レート:
+      - M1〜M8: BOJ会合先OISスワップ（会合日付き先物レート）
+      - T12/T18/T24: 12m/18m/24mテナーOIS（スポットレート）
+
     Returns:
         pd.DataFrame: 指定されたカラムを持つDataFrame
     """
@@ -31,45 +35,49 @@ def load_and_clean_data(excel_path, meeting_csv_path):
         'JPY= (MID_PRICE)': 'USDJPY',
         'JGBc1 (TRDPRC_1)': 'JGB_Future',
         '.N225 (TRDPRC_1)': 'Nikkei225',
-        '.DXY (TRDPRC_1)': 'DXY'
+        '.DXY (TRDPRC_1)': 'DXY',
+        'JP12MONI=TRDT (BID)': 'T12',
+        'JP18MONI=TRDT (BID)': 'T18',
+        'JP24MONI=TRDT (BID)': 'T24',
     }
     df = df.rename(columns=rename_dict)
-    
-    # 不要なカラムの削除
-    cols_to_keep = ['日付', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'USDJPY', 'JGB_Future', 'Nikkei225', 'DXY']
-    df = df[cols_to_keep].copy()
+
+    # 不要なカラムの削除（OIS_1Dは使用しない）
+    cols_to_keep = ['日付', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8',
+                    'USDJPY', 'JGB_Future', 'Nikkei225', 'DXY',
+                    'T12', 'T18', 'T24']
+    df = df[[c for c in cols_to_keep if c in df.columns]].copy()
 
     # 数値化
     numeric_cols = df.columns.drop('日付')
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-    
+
     # 2. 会合履歴のマージ
     df_meetings = pd.read_csv(meeting_csv_path)
     df_meetings['Date'] = pd.to_datetime(df_meetings['Date'])
-    
-    # マージ (左側の '日付' と右側の 'Date' を合わせる)
+
     df = pd.merge(df, df_meetings[['Date', 'Policy_Rate', 'Event']], left_on='日付', right_on='Date', how='left', suffixes=('', '_mtg'))
-    
-    # 会合履歴側の 'Date' は不要なので削除し、'日付' を 'Date' として使用
     df = df.drop(columns=['Date']).rename(columns={'日付': 'Date'})
-    
+
     # 会合日フラグ (Is_Meeting_Day)
     df['Is_Meeting_Day'] = df['Event'].notnull().astype(int)
-    
+
     # 政策金利の前方・後方補完 (Actual_Policy_Rate)
     df['Actual_Policy_Rate'] = df['Policy_Rate'].ffill().bfill()
 
     # 3. 補完フラグの作成 (MICE補完前)
-    boj_cols = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8']
-    for col in boj_cols:
+    # M1-M8: 会合先BOJスワップ、T12/T18/T24: テナーOIS（両方とも予測対象）
+    all_rate_cols = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'T12', 'T18', 'T24']
+    all_rate_cols = [c for c in all_rate_cols if c in df.columns]
+    for col in all_rate_cols:
         df[f'{col}_is_imputed'] = df[col].isnull().astype(int)
 
     # 4. MICE補完
-    impute_target_cols = boj_cols + ['USDJPY', 'JGB_Future', 'Nikkei225', 'DXY']
-    
+    impute_target_cols = all_rate_cols + ['USDJPY', 'JGB_Future', 'Nikkei225', 'DXY']
+    impute_target_cols = [c for c in impute_target_cols if c in df.columns]
+
     imputer = IterativeImputer(estimator=BayesianRidge(), max_iter=20, random_state=42)
-    # 数値列のみ抽出して補完
     df[impute_target_cols] = imputer.fit_transform(df[impute_target_cols])
 
     # 5. Days_to_MPM（会合CSV全日付を使うため、未来の予定会合も含む）
@@ -83,8 +91,11 @@ def load_and_clean_data(excel_path, meeting_csv_path):
     df['Days_to_MPM'] = df['Date'].map(date_to_days)
 
     # 必要な列のみを選択して返す
-    final_cols = ['Date', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8',
-                  'USDJPY', 'JGB_Future', 'Nikkei225', 'DXY',
-                  'Actual_Policy_Rate', 'Is_Meeting_Day', 'Days_to_MPM'] + [f'{c}_is_imputed' for c in boj_cols]
+    tenor_cols = [c for c in ['T12', 'T18', 'T24'] if c in df.columns]
+    ext_cols = [c for c in ['USDJPY', 'JGB_Future', 'Nikkei225', 'DXY'] if c in df.columns]
+    final_cols = (['Date', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8'] +
+                  tenor_cols + ext_cols +
+                  ['Actual_Policy_Rate', 'Is_Meeting_Day', 'Days_to_MPM'] +
+                  [f'{c}_is_imputed' for c in all_rate_cols])
 
     return df[final_cols]
