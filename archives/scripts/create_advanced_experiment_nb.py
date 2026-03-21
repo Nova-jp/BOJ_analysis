@@ -1,0 +1,266 @@
+import json
+
+notebook = {
+    'cells': [
+        {
+            'cell_type': 'markdown',
+            'metadata': {},
+            'source': [
+                '# 08 高度な実験：階層別IC分析と分布の可視化\n',
+                '\n',
+                '本ノートブックでは、以下の3つの変更がモデルの予測精度（IC）に与える影響を詳細に分析します。\n',
+                '1. **Days_since_first_seen** (Exp-E)\n',
+                '2. **Absolute_Meeting_ID** (Exp-D)\n',
+                '3. **バタフライ目的変数変換** (Exp-F)\n',
+                '\n',
+                '平均的なICだけでなく、その分布を確認することで、予測の安定性を検証します。'
+            ]
+        },
+        {
+            'cell_type': 'code',
+            'execution_count': None,
+            'metadata': {},
+            'outputs': [],
+            'source': [
+                'import sys\n',
+                'sys.path.insert(0, "..")\n',
+                'import pandas as pd\n',
+                'import numpy as np\n',
+                'import matplotlib.pyplot as plt\n',
+                'import seaborn as sns\n',
+                'from scipy.stats import spearmanr\n',
+                'from src.processing import load_and_clean_data\n',
+                'from src.features import generate_features\n',
+                'from src.pooling import pool_boj_data, pool_boj_butterfly, butterfly_to_spread\n',
+                'from src.modeling import walk_forward_validation, calculate_metrics\n',
+                '\n',
+                'plt.style.use("ggplot")\n',
+                'EXCEL_PATH = "../data/BOJ_data.xlsx"\n',
+                'MEETING_CSV_PATH = "../data/BOJ_meeting_history.csv"\n',
+                'START_DATE = "2024-01-01"\n',
+                '\n',
+                'df_raw = load_and_clean_data(EXCEL_PATH, MEETING_CSV_PATH)'
+            ]
+        },
+        {
+            'cell_type': 'markdown',
+            'metadata': {},
+            'source': [
+                '## 分析用共通関数の定義'
+            ]
+        },
+        {
+            'cell_type': 'code',
+            'execution_count': None,
+            'metadata': {},
+            'outputs': [],
+            'source': [
+                'def calculate_stratified_ic(res_df, df_input):\n',
+                '    """\n',
+                '    予測結果に対し、DTMグループ、Meeting_Index、FoldごとのICを計算する\n',
+                '    """\n',
+                '    # DTMをマージ (df_inputから取得)\n',
+                '    res = pd.merge(res_df, df_input[["Date", "Meeting_Index", "Days_to_MPM"]].drop_duplicates(), on=["Date", "Meeting_Index"], how="left")\n',
+                '    \n',
+                '    # DTMをグループ化\n',
+                '    res["DTM_Group"] = pd.cut(res["Days_to_MPM"], bins=[-1, 5, 20, 100], labels=["0-5d", "6-20d", "21d+"])\n',
+                '    \n',
+                '    def get_ic(x):\n',
+                '        if len(x) < 2: return np.nan\n',
+                '        return spearmanr(x["Actual"], x["Pred"])[0]\n',
+                '    \n',
+                '    ic_by_dtm = res.groupby("DTM_Group", observed=True).apply(get_ic)\n',
+                '    ic_by_idx = res.groupby("Meeting_Index").apply(get_ic)\n',
+                '    \n',
+                '    # 日付ごとのIC分布を計算（より細かい粒度での安定性確認）\n',
+                '    ic_dist = res.groupby(["Fold", "Date"]).apply(get_ic).reset_index(name="IC")\n',
+                '    \n',
+                '    return {"DTM": ic_by_dtm, "Index": ic_by_idx, "IC_Dist": ic_dist, "Raw": res}\n',
+                '\n',
+                'def plot_comparison(base_stats, exp_stats, title):\n',
+                '    fig = plt.figure(figsize=(20, 10))\n',
+                '    gs = fig.add_gridspec(2, 2)\n',
+                '    \n',
+                '    # 1. DTM別比較 (Bar)\n',
+                '    ax1 = fig.add_subplot(gs[0, 0])\n',
+                '    dtm_df = pd.DataFrame({"Baseline": base_stats["DTM"], "Experiment": exp_stats["DTM"]})\n',
+                '    dtm_df.plot(kind="bar", ax=ax1)\n',
+                '    ax1.set_title("IC by Days to MPM")\n',
+                '    ax1.set_ylabel("IC")\n',
+                '    \n',
+                '    # 2. 限月別比較 (Line)\n',
+                '    ax2 = fig.add_subplot(gs[0, 1])\n',
+                '    idx_df = pd.DataFrame({"Baseline": base_stats["Index"], "Experiment": exp_stats["Index"]})\n',
+                '    idx_df.plot(kind="line", marker="o", ax=ax2)\n',
+                '    ax2.set_title("IC by Meeting Index (M1-M8)")\n',
+                '    ax2.set_xticks(range(1, 9))\n',
+                '    ax2.set_ylabel("IC")\n',
+                '    \n',
+                '    # 3. IC分布比較 (Boxplot)\n',
+                '    ax3 = fig.add_subplot(gs[1, :])\n',
+                '    dist_df = pd.concat([\n',
+                '        base_stats["IC_Dist"].assign(Model="Baseline"),\n',
+                '        exp_stats["IC_Dist"].assign(Model="Experiment")\n',
+                '    ])\n',
+                '    sns.boxplot(x="Fold", y="IC", hue="Model", data=dist_df, ax=ax3)\n',
+                '    ax3.set_title("IC Distribution by Fold (Stability Analysis)")\n',
+                '    \n',
+                '    plt.suptitle(title, fontsize=18)\n',
+                '    plt.tight_layout(rect=[0, 0.03, 1, 0.95])\n',
+                '    plt.show()'
+            ]
+        },
+        {
+            'cell_type': 'markdown',
+            'metadata': {},
+            'source': [
+                '## データの準備 (Baseline)'
+            ]
+        },
+        {
+            'cell_type': 'code',
+            'execution_count': None,
+            'metadata': {},
+            'outputs': [],
+            'source': [
+                'df_feat_base = generate_features(df_raw)\n',
+                'df_pooled_base = pool_boj_data(df_feat_base).drop(columns=["Absolute_Meeting_ID", "Days_since_first_seen"])\n',
+                '\n',
+                'res_3d_base = walk_forward_validation(df_pooled_base, "Target_3d", START_DATE)\n',
+                'res_5d_base = walk_forward_validation(df_pooled_base, "Target_5d", START_DATE)\n',
+                '\n',
+                'stats_3d_base = calculate_stratified_ic(res_3d_base, df_pooled_base)\n',
+                'stats_5d_base = calculate_stratified_ic(res_5d_base, df_pooled_base)'
+            ]
+        },
+        {
+            'cell_type': 'markdown',
+            'metadata': {},
+            'source': [
+                '## 分析1: Days_since_first_seen (Exp-E) の影響'
+            ]
+        },
+        {
+            'cell_type': 'code',
+            'execution_count': None,
+            'metadata': {},
+            'outputs': [],
+            'source': [
+                'df_pooled_e = pool_boj_data(df_feat_base).drop(columns=["Absolute_Meeting_ID"])\n',
+                'res_3d_e = walk_forward_validation(df_pooled_e, "Target_3d", START_DATE)\n',
+                'res_5d_e = walk_forward_validation(df_pooled_e, "Target_5d", START_DATE)\n',
+                '\n',
+                'stats_3d_e = calculate_stratified_ic(res_3d_e, df_pooled_e)\n',
+                'stats_5d_e = calculate_stratified_ic(res_5d_e, df_pooled_e)\n',
+                '\n',
+                'plot_comparison(stats_3d_base, stats_3d_e, "Exp-E (Days_since_first_seen) vs Baseline")'
+            ]
+        },
+        {
+            'cell_type': 'markdown',
+            'metadata': {},
+            'source': [
+                '## 分析2: Absolute_Meeting_ID (Exp-D) の影響'
+            ]
+        },
+        {
+            'cell_type': 'code',
+            'execution_count': None,
+            'metadata': {},
+            'outputs': [],
+            'source': [
+                'df_pooled_d = pool_boj_data(df_feat_base).drop(columns=["Days_since_first_seen"])\n',
+                'res_3d_d = walk_forward_validation(df_pooled_d, "Target_3d", START_DATE)\n',
+                'res_5d_d = walk_forward_validation(df_pooled_d, "Target_5d", START_DATE)\n',
+                '\n',
+                'stats_3d_d = calculate_stratified_ic(res_3d_d, df_pooled_d)\n',
+                'stats_5d_d = calculate_stratified_ic(res_5d_d, df_pooled_d)\n',
+                '\n',
+                'plot_comparison(stats_3d_base, stats_3d_d, "Exp-D (Absolute_Meeting_ID) vs Baseline")'
+            ]
+        },
+        {
+            'cell_type': 'markdown',
+            'metadata': {},
+            'source': [
+                '## 分析3: バタフライ目的変数変換 (Exp-F) の影響'
+            ]
+        },
+        {
+            'cell_type': 'code',
+            'execution_count': None,
+            'metadata': {},
+            'outputs': [],
+            'source': [
+                'def get_butterfly_results(df_raw, horizon):\n',
+                '    df_feat = generate_features(df_raw)\n',
+                '    df_b = pool_boj_butterfly(df_feat)\n',
+                '    target_col = f"Target_{horizon}d_B_norm"\n',
+                '    df_input = df_b.rename(columns={"Butterfly_Index": "Meeting_Index"})\n',
+                '    \n',
+                '    res_b = walk_forward_validation(df_input, target_col, START_DATE)\n',
+                '    res_b = pd.merge(res_b, df_input[["Date", "Meeting_Index", f"Target_{horizon}d_B_std"]], on=["Date", "Meeting_Index"], how="left")\n',
+                '    \n',
+                '    # 逆変換ロジック\n',
+                '    pred_pivot = res_b.pivot(index="Date", columns="Meeting_Index", values="Pred")\n',
+                '    std_pivot = res_b.pivot(index="Date", columns="Meeting_Index", values=f"Target_{horizon}d_B_std")\n',
+                '    pred_raw_b = pred_pivot * std_pivot\n',
+                '    \n',
+                '    reconstructed_rows = []\n',
+                '    for date, row in pred_raw_b.iterrows():\n',
+                '        s_diff = butterfly_to_spread(row.values)\n',
+                '        for i, val in enumerate(s_diff):\n',
+                '            reconstructed_rows.append({"Date": date, "Meeting_Index": i+1, "Pred_Recon": val})\n',
+                '    \n',
+                '    pred_recon = pd.DataFrame(reconstructed_rows)\n',
+                '    \n',
+                '    # Fold情報とDTM情報を元の res_b から取得してマージ\n',
+                '    fold_dtm = res_b[["Date", "Fold"]].drop_duplicates()\n',
+                '    pred_recon = pd.merge(pred_recon, fold_dtm, on="Date", how="left")\n',
+                '    \n',
+                '    # 正解データを pool_boj_data から取得\n',
+                '    df_p = pool_boj_data(df_feat)\n',
+                '    final_res = pd.merge(\n',
+                '        pred_recon, \n',
+                '        df_p[df_p["Is_Tenor_OIS"]==0][["Date", "Meeting_Index", f"Target_{horizon}d"]], \n',
+                '        on=["Date", "Meeting_Index"], \n',
+                '        how="inner"\n',
+                '    ).rename(columns={f"Target_{horizon}d": "Actual", "Pred_Recon": "Pred"})\n',
+                '    \n',
+                '    return final_res\n',
+                '\n',
+                'res_3d_f = get_butterfly_results(df_raw, 3)\n',
+                'res_5d_f = get_butterfly_results(df_raw, 5)\n',
+                '\n',
+                'stats_3d_f = calculate_stratified_ic(res_3d_f, df_pooled_base)\n',
+                'stats_5d_f = calculate_stratified_ic(res_5d_f, df_pooled_base)\n',
+                '\n',
+                'plot_comparison(stats_3d_base, stats_3d_f, "Exp-F (Butterfly Target) vs Baseline")'
+            ]
+        }
+    ],
+    'metadata': {
+        'kernelspec': {
+            'display_name': 'Python 3',
+            'language': 'python',
+            'name': 'python3'
+        },
+        'language_info': {
+            'codemirror_mode': {
+                'name': 'ipython',
+                'version': 3
+            },
+            'file_extension': '.py',
+            'mimetype': 'text/x-python',
+            'name': 'python',
+            'nbconvert_exporter': 'python',
+            'pygments_lexer': 'ipython3',
+            'version': '3.8.10'
+        }
+    },
+    'nbformat': 4,
+    'nbformat_minor': 4
+}
+
+with open('notebooks/08_advanced_feature_experiments.ipynb', 'w') as f:
+    json.dump(notebook, f, indent=2, ensure_ascii=False)

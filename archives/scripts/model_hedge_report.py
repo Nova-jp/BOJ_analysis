@@ -49,6 +49,7 @@ ALL_INSTR    = BOJ_INSTR + TENOR_INSTR
 LABEL_ORDER  = ALL_INSTR
 
 ROLL_WINDOW  = 252
+BAR_WIDTH    = 0.38
 
 # ════════════════════════════════════════════════════════════════════════════════
 # 1. DATA PIPELINE
@@ -65,11 +66,11 @@ df_pool = pool_boj_data(df_feat)
 # 2. WALK-FORWARD VALIDATION
 # ════════════════════════════════════════════════════════════════════════════════
 print('Running walk-forward (3d_norm)...')
-res3, mdl3, Xt3, yt3, Xtr3 = walk_forward_validation(
+res3, mdl3, *_ = walk_forward_validation(
     df_pool, 'Target_3d_norm', START_DATE, return_model=True)
 
 print('Running walk-forward (5d_norm)...')
-res5, mdl5, Xt5, yt5, Xtr5 = walk_forward_validation(
+res5, mdl5, *_ = walk_forward_validation(
     df_pool, 'Target_5d_norm', START_DATE, return_model=True)
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -113,13 +114,13 @@ ic_lbl3 = ic_by_group(res3, 'Rate_Label')
 ic_lbl5 = ic_by_group(res5, 'Rate_Label')
 
 # IC by Days_to_MPM bucket
-DTM_BINS   = [0, 5, 15, 30, 9999]
+# bins start at -1 so Days_to_MPM=0 (meeting day) is captured in <=5d bucket
+DTM_BINS   = [-1, 5, 15, 30, 9999]
 DTM_LABELS = ['<=5d', '6-15d', '16-30d', '>30d']
 
 def ic_by_dtm(res_df):
-    df = res_df.copy()
-    df['bucket'] = pd.cut(df['Days_to_MPM'], bins=DTM_BINS,
-                          labels=DTM_LABELS, right=True)
+    df = res_df.assign(bucket=pd.cut(res_df['Days_to_MPM'], bins=DTM_BINS,
+                                     labels=DTM_LABELS, right=True))
     rows = []
     for b, sub in df.groupby('bucket', observed=True):
         ic, _ = spearmanr(sub['Actual'], sub['Pred'])
@@ -196,19 +197,22 @@ delta = delta.rename(columns={f'{inst}_spread': inst
                                 for inst in BOJ_INSTR + tenor_instr_avail})
 
 def ols_hedge(y_s, x_s):
-    df = pd.DataFrame({'y': y_s, 'x': x_s}).dropna()
-    if len(df) < 30:
+    y = np.asarray(y_s, dtype=float)
+    x = np.asarray(x_s, dtype=float)
+    mask = ~(np.isnan(y) | np.isnan(x))
+    y, x = y[mask], x[mask]
+    if len(y) < 30:
         return None
-    slope, _, r, _, _ = stats.linregress(df['x'], df['y'])
-    sigma_y = df['y'].std()
+    slope, _, r, _, _ = stats.linregress(x, y)
+    sigma_y = y.std()
     return {
-        'H*':             round(slope, 4),
-        'Vol Ratio':      round(sigma_y / df['x'].std(), 4),
-        'rho':            round(r, 4),
-        'R2 (%)':         round(r**2 * 100, 1),
-        'sigma_Mn (bps)': round(sigma_y * 100, 4),
+        'H*':              round(slope, 4),
+        'Vol Ratio':       round(sigma_y / x.std(), 4),
+        'rho':             round(r, 4),
+        'R2 (%)':          round(r**2 * 100, 1),
+        'sigma_Mn (bps)':  round(sigma_y * 100, 4),
         'Resid std (bps)': round(sigma_y * np.sqrt(1 - r**2) * 100, 4),
-        'N':              len(df),
+        'N':               len(y),
     }
 
 ols_dict = {inst: ols_hedge(delta[inst], delta['T12'])
@@ -219,9 +223,10 @@ df_ols = pd.DataFrame({k: v for k, v in ols_dict.items() if v}).T
 boj_in_ols = [i for i in BOJ_INSTR if i in df_ols.index]
 
 # ── DV01-adjusted notional hedge ─────────────────────────────────────────────
-meetings_df  = pd.read_csv(MEETING_CSV, parse_dates=['Date'])
-avg_interval = meetings_df['Date'].diff().dt.days.dropna().mean()
-avg_m1_tenor = df_feat['Days_to_MPM'].mean()
+# Derive meeting statistics from already-loaded df_feat (avoids re-reading CSV)
+_meeting_dates = df_feat.loc[df_feat['Is_Meeting_Day'] == 1, 'Date'].sort_values()
+avg_interval   = _meeting_dates.diff().dt.days.dropna().mean()
+avg_m1_tenor   = df_feat['Days_to_MPM'].mean()
 tenor_map    = {f'M{n}': avg_m1_tenor + (n - 1) * avg_interval for n in range(1, 9)}
 T12_DAYS     = 365.25
 
@@ -248,18 +253,13 @@ for inst in boj_in_ols:
 df_dv01 = pd.DataFrame(dv01_rows).set_index('Instrument')
 
 # ── Rolling beta ──────────────────────────────────────────────────────────────
-def rolling_beta(y_arr, x_arr, window):
-    betas = [np.nan] * (window - 1)
-    for end in range(window, len(y_arr) + 1):
-        yy = y_arr[end - window:end]
-        xx = x_arr[end - window:end]
-        mask = ~(np.isnan(yy) | np.isnan(xx))
-        if mask.sum() < 30:
-            betas.append(np.nan)
-        else:
-            s, *_ = stats.linregress(xx[mask], yy[mask])
-            betas.append(s)
-    return np.array(betas)
+def rolling_beta(y_arr, x_arr, window, min_periods=30):
+    """Vectorized rolling OLS beta = rolling_cov(y,x) / rolling_var(x)."""
+    y = pd.Series(y_arr)
+    x = pd.Series(x_arr)
+    cov = y.rolling(window, min_periods=min_periods).cov(x)
+    var = x.rolling(window, min_periods=min_periods).var()
+    return (cov / var).values
 
 dates_arr = delta.index.values
 x_arr     = delta['T12'].values
@@ -469,9 +469,9 @@ with PdfPages(OUTPUT_PATH) as pdf:
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     fig.suptitle(f'Latest Predictions  (as of {latest_date})', fontsize=14)
 
-    for ax, lat_df, instr_std, title in [
-            (axes[0], latest3, instr_std_3d, '3d Prediction (bps)'),
-            (axes[1], latest5, instr_std_5d, '5d Prediction (bps)')]:
+    for ax, lat_df, title in [
+            (axes[0], latest3, '3d Prediction (bps)'),
+            (axes[1], latest5, '5d Prediction (bps)')]:
         if lat_df.empty:
             ax.text(0.5, 0.5, 'No data', ha='center', va='center',
                     transform=ax.transAxes)
@@ -508,9 +508,9 @@ with PdfPages(OUTPUT_PATH) as pdf:
     ax = axes[0]
     beta = df_ols.loc[boj_in_ols, 'H*'].astype(float)
     volr = df_ols.loc[boj_in_ols, 'Vol Ratio'].astype(float)
-    ax.bar(x - 0.2, beta.values, 0.38, label='OLS beta (H*)',
+    ax.bar(x - 0.2, beta.values, BAR_WIDTH, label='OLS beta (H*)',
            color='steelblue', edgecolor='black', linewidth=0.5)
-    ax.bar(x + 0.2, volr.values, 0.38, label='Vol ratio (ref)',
+    ax.bar(x + 0.2, volr.values, BAR_WIDTH, label='Vol ratio (ref)',
            color='lightgray',  edgecolor='black', linewidth=0.5)
     ax.axhline(0, color='black', linewidth=0.6)
     ax.set_xticks(x); ax.set_xticklabels(boj_in_ols)
@@ -529,8 +529,8 @@ with PdfPages(OUTPUT_PATH) as pdf:
     ax = axes[2]
     sm  = df_ols.loc[boj_in_ols, 'sigma_Mn (bps)'].astype(float)
     sr  = df_ols.loc[boj_in_ols, 'Resid std (bps)'].astype(float)
-    ax.bar(x - 0.2, sm.values,  0.38, label='Unhedged sigma',   color='salmon',    edgecolor='black', linewidth=0.5)
-    ax.bar(x + 0.2, sr.values,  0.38, label='Residual (hedged)', color='steelblue', edgecolor='black', linewidth=0.5)
+    ax.bar(x - 0.2, sm.values,  BAR_WIDTH, label='Unhedged sigma',   color='salmon',    edgecolor='black', linewidth=0.5)
+    ax.bar(x + 0.2, sr.values,  BAR_WIDTH, label='Residual (hedged)', color='steelblue', edgecolor='black', linewidth=0.5)
     ax.set_xticks(x); ax.set_xticklabels(boj_in_ols)
     ax.set_title('Risk Before vs After Hedge (bps/day)'); ax.set_ylabel('Std (bps/day)')
     ax.legend(fontsize=8)
@@ -600,9 +600,9 @@ with PdfPages(OUTPUT_PATH) as pdf:
         off_v = (df_regime[df_regime['Period'] == 'Off-MPM']
                  .set_index('Instrument')[metric].reindex(boj_in_ols))
         xr = np.arange(len(boj_in_ols))
-        ax.bar(xr - 0.2, pre_v.values.astype(float), 0.38,
+        ax.bar(xr - 0.2, pre_v.values.astype(float), BAR_WIDTH,
                label='Pre-MPM (<=5d)', color='coral',     edgecolor='black', linewidth=0.5)
-        ax.bar(xr + 0.2, off_v.values.astype(float), 0.38,
+        ax.bar(xr + 0.2, off_v.values.astype(float), BAR_WIDTH,
                label='Off-MPM  (>5d)', color='steelblue', edgecolor='black', linewidth=0.5)
         ax.axhline(0, color='black', linewidth=0.5)
         ax.set_xticks(xr); ax.set_xticklabels(boj_in_ols)
@@ -622,9 +622,9 @@ with PdfPages(OUTPUT_PATH) as pdf:
 
     # H* vs Notional hedge
     ax = fig.add_subplot(gs[0, 0])
-    ax.bar(xd - 0.2, df_dv01['H* (rate)'].values,      0.38,
+    ax.bar(xd - 0.2, df_dv01['H* (rate)'].values,      BAR_WIDTH,
            label='H* (rate, same face)',       color='lightgray',  edgecolor='black', linewidth=0.5)
-    ax.bar(xd + 0.2, df_dv01['Notional hedge'].values,  0.38,
+    ax.bar(xd + 0.2, df_dv01['Notional hedge'].values,  BAR_WIDTH,
            label='Notional hedge (DV01-adj.)', color='steelblue',  edgecolor='black', linewidth=0.5)
     ax.axhline(0, color='black', linewidth=0.5)
     ax.set_xticks(xd); ax.set_xticklabels(boj_dv)

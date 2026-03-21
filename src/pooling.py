@@ -46,6 +46,62 @@ def pool_boj_data(df):
     # 2. 目的変数の生成（Rate_Labelグループ内でshift）
     pooled = pooled.sort_values(['Rate_Label', 'Date']).reset_index(drop=True)
 
+    # --- Exp-D: Absolute_Meeting_ID の計算 ---
+    # 1. df の各行から「次の会合日」を再構成
+    df_dates = df[['Date', 'Days_to_MPM']].drop_duplicates()
+    df_dates = df_dates.dropna(subset=['Days_to_MPM'])
+    df_dates['Next_Meeting_Date'] = df_dates['Date'] + pd.to_timedelta(
+        df_dates['Days_to_MPM'].astype(int), unit='D'
+    )
+
+    # 2. 全会合日をソートしてランク辞書を作る
+    all_meeting_dates = sorted(df_dates['Next_Meeting_Date'].unique())
+    meeting_date_to_rank = {m: i for i, m in enumerate(all_meeting_dates)}
+
+    # 3. 各日付の「次の会合」のランクを引く
+    date_to_next_rank = dict(zip(df_dates['Date'], df_dates['Next_Meeting_Date'].map(meeting_date_to_rank)))
+
+    # 4. pooled DataFrame に適用（melt後なので Meeting_Index 列が使える）
+    #    Absolute_Meeting_ID = rank(次の会合) + Meeting_Index - 1
+    #    注：Is_Tenor_OIS=1 の行は Meeting_Index が 10 以上なので、Absolute_Meeting_ID は意味を持たない（が計算はされる）
+    pooled['_next_rank'] = pooled['Date'].map(date_to_next_rank)
+    pooled['Absolute_Meeting_ID'] = (pooled['_next_rank'] + pooled['Meeting_Index'] - 1).astype('Int64')
+    
+    # Is_Tenor_OIS=1 の行は NaN にする
+    pooled.loc[pooled['Is_Tenor_OIS'] == 1, 'Absolute_Meeting_ID'] = pd.NA
+    pooled = pooled.drop(columns=['_next_rank'])
+
+    # --- Exp-E: Days_since_first_seen の計算 ---
+    data_start_date = df['Date'].min()
+
+    def get_first_seen_date(abs_id):
+        if pd.isna(abs_id):
+            return pd.NaT
+        k = int(abs_id)
+        predecessor_idx = k - 8
+        if predecessor_idx < 0:
+            return data_start_date
+        elif predecessor_idx < len(all_meeting_dates):
+            return all_meeting_dates[predecessor_idx]
+        else:
+            return pd.NaT
+
+    abs_id_to_first_seen = {
+        k: get_first_seen_date(k) for k in pooled['Absolute_Meeting_ID'].dropna().unique()
+    }
+
+    pooled['First_Seen_Date'] = pooled['Absolute_Meeting_ID'].map(abs_id_to_first_seen)
+    pooled['Days_since_first_seen'] = (pooled['Date'] - pooled['First_Seen_Date']).dt.days
+    pooled = pooled.drop(columns=['First_Seen_Date'])
+
+    # --- I4対応: Days_since_first_seen が打ち切られた初期会合を除外 ---
+    # Absolute_Meeting_ID < 8 の会合はデータ開始前に初観測されており、
+    # Days_since_first_seen が実際より小さい不正確な値になる。
+    # これらはゼロ金利時代初期のデータであり、除外しても学習への影響は軽微。
+    # Is_Tenor_OIS=1 の行（T12/T18/T24）は Absolute_Meeting_ID=NaN のため影響なし。
+    truncated_mask = (pooled['Is_Tenor_OIS'] == 0) & (pooled['Absolute_Meeting_ID'] < 8)
+    pooled = pooled[~truncated_mask].reset_index(drop=True)
+
     for h in [1, 3, 5]:
         pooled[f'Target_{h}d'] = (
             pooled.groupby('Rate_Label')['Rate_Value'].shift(-h) - pooled['Rate_Value']
@@ -74,10 +130,11 @@ def pool_boj_data(df):
     tenor_spread_cols = [f'{c}_spread'     for c in tenor_rate_cols]
     tenor_fd_cols     = [f'{c}_frac_diff'  for c in tenor_rate_cols]
     tenor_imp_cols    = [f'{c}_is_imputed' for c in tenor_rate_cols]
-    ext_fd_cols      = ['USDJPY_frac_diff', 'JGB_Future_frac_diff', 'Nikkei225_frac_diff']
+    ext_fd_cols      = ['USDJPY_frac_diff', 'JGB_Future_frac_diff', 'Nikkei225_frac_diff', 'DXY_frac_diff']
 
     basic_cols  = ['Date', 'Rate_Label', 'Meeting_Index', 'Is_Tenor_OIS',
-                   'is_post_mpm', 'Days_to_MPM', 'Actual_Policy_Rate']
+                   'is_post_mpm', 'Days_to_MPM', 'Actual_Policy_Rate',
+                   'Absolute_Meeting_ID', 'Days_since_first_seen']
     target_cols = ['Target_1d',
                    'Target_3d', 'Target_3d_norm', 'Target_3d_std',
                    'Target_5d', 'Target_5d_norm', 'Target_5d_std']
@@ -100,3 +157,4 @@ def pool_boj_data(df):
     # 存在する列のみを選択
     available_cols = [c for c in final_cols if c in pooled.columns]
     return pooled[available_cols]
+

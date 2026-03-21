@@ -6,18 +6,24 @@ def frac_diff(series, d, window=50):
     分数階差を計算する。
     w_k = (-1)^k * C(d, k)
     windowサイズ分の過去データが揃わない先頭行はNaNとする。
+
+    rolling().apply() を使わず numpy ループで実装することで
+    Python 関数呼び出しのオーバーヘッドを回避している。
     """
     weights = [1.0]
     for k in range(1, window):
         weights.append(-weights[-1] * (d - k + 1) / k)
-    weights = np.array(weights[::-1]) # 過去から現在への重み
+    weights = np.array(weights[::-1])  # 過去から現在への重み
 
-    def apply_weights(x):
-        if len(x) < window or np.isnan(x).any():
-            return np.nan
-        return np.dot(x, weights)
+    arr = series.to_numpy(dtype=float)
+    result = np.full(len(arr), np.nan)
+    for i in range(window - 1, len(arr)):
+        window_data = arr[i - window + 1:i + 1]
+        if np.isnan(window_data).any():
+            continue
+        result[i] = np.dot(window_data, weights)
 
-    return series.rolling(window=window).apply(apply_weights, raw=True)
+    return pd.Series(result, index=series.index)
 
 def generate_features(
     df,
@@ -50,7 +56,7 @@ def generate_features(
         feat_df[f'{col}_frac_diff'] = frac_diff(feat_df[f'{col}_spread'], d=d, window=window)
 
     # 3. 外部指標の分数階差
-    ext_cols = ['USDJPY', 'JGB_Future', 'Nikkei225']
+    ext_cols = ['USDJPY', 'JGB_Future', 'Nikkei225', 'DXY']
     for col in ext_cols:
         if col in feat_df.columns:
             feat_df[f'{col}_frac_diff'] = frac_diff(feat_df[col], d=d, window=window)
@@ -69,9 +75,10 @@ def generate_features(
 
     # --- Exp-A: 曜日の円環エンコーディング ---
     if add_weekday_cyclic:
-        feat_df['DayOfWeek'] = feat_df['Date'].dt.dayofweek  # 0〜4
-        feat_df['DayOfWeek_sin'] = np.sin(2 * np.pi * feat_df['DayOfWeek'] / 5)
-        feat_df['DayOfWeek_cos'] = np.cos(2 * np.pi * feat_df['DayOfWeek'] / 5)
+        # DayOfWeek（整数）は中間変数のため DataFrame には追加しない
+        _day_of_week = feat_df['Date'].dt.dayofweek  # 0〜4
+        feat_df['DayOfWeek_sin'] = np.sin(2 * np.pi * _day_of_week / 5)
+        feat_df['DayOfWeek_cos'] = np.cos(2 * np.pi * _day_of_week / 5)
 
     # --- Exp-B: Days_to_MPM の円環エンコーディング ---
     if add_days_to_mpm_cyclic:

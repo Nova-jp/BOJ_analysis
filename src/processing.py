@@ -1,3 +1,4 @@
+import bisect
 import pandas as pd
 import numpy as np
 from sklearn.experimental import enable_iterative_imputer
@@ -17,7 +18,8 @@ def load_and_clean_data(excel_path, meeting_csv_path):
     """
     # 1. 生データの読み込み
     df_raw = pd.read_excel(excel_path)
-    # 最初の行がヘッダーの一部（単位など）の場合があるため調整
+    # Excelの2行目（index=1）はヘッダー直下の不要行（単位・注釈等）のため除去。
+    # Reuters Eikon エクスポート形式の固定仕様。フォーマットが変わった場合はここを要確認。
     df = df_raw.iloc[1:].copy()
     df['日付'] = pd.to_datetime(df['日付'], format='%Y年%m月%d日')
     df = df.sort_values('日付').reset_index(drop=True)
@@ -63,7 +65,12 @@ def load_and_clean_data(excel_path, meeting_csv_path):
     # 会合日フラグ (Is_Meeting_Day)
     df['Is_Meeting_Day'] = df['Event'].notnull().astype(int)
 
-    # 政策金利の前方・後方補完 (Actual_Policy_Rate)
+    # 政策金利の補完 (Actual_Policy_Rate)
+    # ffill(): 各会合の決定金利を次の会合まで前方補完。
+    # bfill(): データ開始〜最初の会合日の間（通常数日〜数週間）を補完。
+    # 注意: 以前は bfill() によりデータ先頭に未来の金利が混入するリークがあったが、
+    # BOJ_meeting_history.csv が 2007年1月まで整備された現在は安全。
+    # bfill() が埋める期間は「データ開始〜最初の会合日」のみで、率も正しい。
     df['Actual_Policy_Rate'] = df['Policy_Rate'].ffill().bfill()
 
     # 3. 補完フラグの作成 (MICE補完前)
@@ -84,8 +91,11 @@ def load_and_clean_data(excel_path, meeting_csv_path):
     all_meeting_dates = sorted(df_meetings['Date'].unique())
 
     def days_to_next_mpm(date):
-        future = [m for m in all_meeting_dates if m >= date]
-        return (future[0] - date).days if future else np.nan
+        # bisect_left で O(log N) の二分探索
+        idx = bisect.bisect_left(all_meeting_dates, date)
+        if idx < len(all_meeting_dates):
+            return (all_meeting_dates[idx] - date).days
+        return np.nan
 
     date_to_days = {d: days_to_next_mpm(d) for d in df['Date'].unique()}
     df['Days_to_MPM'] = df['Date'].map(date_to_days)
