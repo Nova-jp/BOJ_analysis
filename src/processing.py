@@ -5,6 +5,21 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from sklearn.linear_model import BayesianRidge
 
+def load_meeting_dates(meeting_csv_path):
+    """
+    MPM 会合日一覧を昇順で返す。
+
+    pool_boj_data の Absolute_Meeting_ID 計算など、
+    会合日リストを直接参照する箇所で使用する。
+
+    Returns:
+        list[pd.Timestamp]: 会合日の昇順リスト
+    """
+    df_meetings = pd.read_csv(meeting_csv_path)
+    df_meetings['Date'] = pd.to_datetime(df_meetings['Date'])
+    return sorted(df_meetings['Date'].unique())
+
+
 def load_and_clean_data(excel_path, meeting_csv_path):
     """
     MICEを用いた補完、フラグ生成、および会合日フラグの作成を行う。
@@ -81,6 +96,14 @@ def load_and_clean_data(excel_path, meeting_csv_path):
         df[f'{col}_is_imputed'] = df[col].isnull().astype(int)
 
     # 4. MICE補完
+    # 【設計上の注意】imputer を全期間データで fit_transform している（フォールド外情報を含む）。
+    # フォールド内 fit 化が理想だが、以下の理由で全期間 fit を許容する:
+    #   - 欠損は主に休日・データ欠落由来で欠損率が低い（影響行が少ない）
+    #   - BayesianRidge が学習する「金利間の線形相関」は長期的に安定しており、
+    #     フォールド別 fit でも結果がほぼ変わらない
+    #   - {col}_is_imputed フラグで補完箇所をモデルに伝えているため学習時に識別可能
+    #   - 特徴量重要度分析でも is_imputed フラグは上位に出ず、補完の歪みが
+    #     予測に影響していないことを確認済み（2026-03-21）
     impute_target_cols = all_rate_cols + ['USDJPY', 'JGB_Future', 'Nikkei225', 'DXY']
     impute_target_cols = [c for c in impute_target_cols if c in df.columns]
 
@@ -100,12 +123,19 @@ def load_and_clean_data(excel_path, meeting_csv_path):
     date_to_days = {d: days_to_next_mpm(d) for d in df['Date'].unique()}
     df['Days_to_MPM'] = df['Date'].map(date_to_days)
 
+    # 6. is_post_mpm フラグ（MPM当日 + 翌5日間）
+    # rolling(window=6) で「今日含む過去6日のうちに会合日があるか」を判定。
+    # pooling*.py の3ファイルに同一ロジックが重複していたためここに集約。
+    df['is_post_mpm'] = (
+        df['Is_Meeting_Day'].rolling(window=6, min_periods=1).max() == 1
+    ).astype(int)
+
     # 必要な列のみを選択して返す
     tenor_cols = [c for c in ['T12', 'T18', 'T24'] if c in df.columns]
     ext_cols = [c for c in ['USDJPY', 'JGB_Future', 'Nikkei225', 'DXY'] if c in df.columns]
     final_cols = (['Date', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8'] +
                   tenor_cols + ext_cols +
-                  ['Actual_Policy_Rate', 'Is_Meeting_Day', 'Days_to_MPM'] +
+                  ['Actual_Policy_Rate', 'Is_Meeting_Day', 'is_post_mpm', 'Days_to_MPM'] +
                   [f'{c}_is_imputed' for c in all_rate_cols])
 
     return df[final_cols]

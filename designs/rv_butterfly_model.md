@@ -30,7 +30,10 @@ from src.features_rv import generate_rv_features
 from src.pooling_butterfly import pool_butterfly_data
 from src.modeling import walk_forward_validation, summarize_ic
 
-df_raw    = load_and_clean_data('../data/BOJ_data.xlsx', '../data/BOJ_meeting_history.csv')
+EXCEL_PATH   = '../data/BOJ_data.xlsx'
+MEETING_PATH = '../data/BOJ_meeting_history.csv'
+
+df_raw    = load_and_clean_data(EXCEL_PATH, MEETING_PATH)
 df_feat   = generate_rv_features(df_raw)
 df_pooled = pool_butterfly_data(df_feat)
 

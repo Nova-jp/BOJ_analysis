@@ -1,9 +1,15 @@
+import bisect
 import pandas as pd
 import numpy as np
 
-def pool_boj_data(df):
+def pool_boj_data(df, meeting_dates):
     """
     設計仕様に基づきデータをプーリング（縦持ち変換）し、ターゲットを生成する。
+
+    Args:
+        df:             load_and_clean_data + generate_features の出力 DataFrame
+        meeting_dates:  load_meeting_dates() が返す会合日リスト（pd.Timestamp のリスト）
+                        Absolute_Meeting_ID の計算に使用する。
 
     レート種別:
       - M1〜M8: 会合先BOJスワップ → Meeting_Index=1〜8, Tenor_Months=0, Is_Tenor_OIS=0
@@ -47,19 +53,18 @@ def pool_boj_data(df):
     pooled = pooled.sort_values(['Rate_Label', 'Date']).reset_index(drop=True)
 
     # --- Exp-D: Absolute_Meeting_ID の計算 ---
-    # 1. df の各行から「次の会合日」を再構成
-    df_dates = df[['Date', 'Days_to_MPM']].drop_duplicates()
-    df_dates = df_dates.dropna(subset=['Days_to_MPM'])
-    df_dates['Next_Meeting_Date'] = df_dates['Date'] + pd.to_timedelta(
-        df_dates['Days_to_MPM'].astype(int), unit='D'
-    )
-
-    # 2. 全会合日をソートしてランク辞書を作る
-    all_meeting_dates = sorted(df_dates['Next_Meeting_Date'].unique())
+    # meeting_dates は load_meeting_dates() から直接受け取る（Days_to_MPM 逆算不要）
+    all_meeting_dates = [pd.Timestamp(m) for m in meeting_dates]
     meeting_date_to_rank = {m: i for i, m in enumerate(all_meeting_dates)}
 
-    # 3. 各日付の「次の会合」のランクを引く
-    date_to_next_rank = dict(zip(df_dates['Date'], df_dates['Next_Meeting_Date'].map(meeting_date_to_rank)))
+    # 各日付に対して「次の会合日」を二分探索で求め、そのランクを取得する
+    def _get_next_meeting_rank(date):
+        idx = bisect.bisect_left(all_meeting_dates, date)
+        if idx < len(all_meeting_dates):
+            return meeting_date_to_rank[all_meeting_dates[idx]]
+        return None
+
+    date_to_next_rank = {d: _get_next_meeting_rank(d) for d in df['Date'].unique()}
 
     # 4. pooled DataFrame に適用（melt後なので Meeting_Index 列が使える）
     #    Absolute_Meeting_ID = rank(次の会合) + Meeting_Index - 1
@@ -116,12 +121,7 @@ def pool_boj_data(df):
         pooled[f'Target_{h}d_std']  = instr_std
         pooled[f'Target_{h}d_norm'] = pooled[f'Target_{h}d'] / instr_std
 
-    # 4. MPM当日・直後5日間の除外フラグ
-    df_date_meeting = df[['Date', 'Is_Meeting_Day']].copy()
-    df_date_meeting['is_post_mpm'] = (
-        df_date_meeting['Is_Meeting_Day'].rolling(window=6, min_periods=1).max() == 1
-    ).astype(int)
-    pooled = pd.merge(pooled, df_date_meeting[['Date', 'is_post_mpm']], on='Date', how='left')
+    # 4. is_post_mpm は processing.py で生成済み → id_cols 経由で melt 後も pooled に存在する
 
     # 5. カラムの整理
     boj_spread_cols  = [f'M{i}_spread'     for i in range(1, 9)]

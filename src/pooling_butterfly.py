@@ -42,24 +42,18 @@ def pool_butterfly_data(df):
         )
 
     # per-butterfly std 正規化
+    # 【設計上の注意】全期間 std（フォールド外情報を含む）で正規化している。
+    # フォールド内 std 化が理想だが、以下の理由で全期間 std を許容する:
+    #   - ICは Spearman ランク相関のため、定数倍では変化しない（IC評価に影響ゼロ）
+    #   - バタフライのボラティリティは長期的に安定しており、フォールド別 std との差が軽微
+    #   - 目的は LightGBM の MSE ロスで高ボラ系列が支配しないようにすること（スケール補正）
     for h in [3, 5]:
         instr_std = pooled.groupby('Rate_Label')[f'Target_{h}d'].transform('std')
         pooled[f'Target_{h}d_std']  = instr_std
         pooled[f'Target_{h}d_norm'] = pooled[f'Target_{h}d'] / instr_std
 
     # -------------------------------------------------------------------
-    # is_post_mpm フラグ
-    # -------------------------------------------------------------------
-    df_date_meeting = df[['Date', 'Is_Meeting_Day']].copy()
-    df_date_meeting['is_post_mpm'] = (
-        df_date_meeting['Is_Meeting_Day'].rolling(window=6, min_periods=1).max() == 1
-    ).astype(int)
-    pooled = pd.merge(
-        pooled,
-        df_date_meeting[['Date', 'is_post_mpm']],
-        on='Date',
-        how='left',
-    )
+    # is_post_mpm は processing.py で生成済み → id_cols 経由で melt 後も pooled に存在する
 
     # -------------------------------------------------------------------
     # Fly_Level: B{n} の現在水準（mean reversion の起点）

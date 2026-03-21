@@ -100,22 +100,26 @@ categorical_feature = ['Meeting_Index', 'Is_Tenor_OIS', 'Absolute_Meeting_ID']
 
 ## 実装ファイル
 
-- `src/processing.py` : `load_and_clean_data(excel_path, meeting_csv_path)`
+- `src/processing.py` : `load_and_clean_data(excel_path, meeting_csv_path)`, `load_meeting_dates(meeting_csv_path)`
 - `src/features.py` : `generate_features(df, d=0.4, window=50)`
-- `src/pooling.py` : `pool_boj_data(df)`
-- `src/modeling.py` : `walk_forward_validation(df, target_col, start_date)`
+- `src/pooling.py` : `pool_boj_data(df, meeting_dates)`
+- `src/modeling.py` : `walk_forward_validation(df, target_col, start_date)`, `walk_forward_with_model(...)`
 
 ## 標準的な実行コード
 
 ```python
-from src.processing import load_and_clean_data
+from src.processing import load_and_clean_data, load_meeting_dates
 from src.features import generate_features
 from src.pooling import pool_boj_data
-from src.modeling import walk_forward_validation, calculate_metrics
+from src.modeling import walk_forward_validation, summarize_ic
 
-df_raw    = load_and_clean_data('../data/BOJ_data.xlsx', '../data/BOJ_meeting_history.csv')
-df_feat   = generate_features(df_raw)
-df_pooled = pool_boj_data(df_feat)
+EXCEL_PATH   = '../data/BOJ_data.xlsx'
+MEETING_PATH = '../data/BOJ_meeting_history.csv'
+
+df_raw        = load_and_clean_data(EXCEL_PATH, MEETING_PATH)
+meeting_dates = load_meeting_dates(MEETING_PATH)
+df_feat       = generate_features(df_raw)
+df_pooled     = pool_boj_data(df_feat, meeting_dates)
 
 res_3d = walk_forward_validation(df_pooled, 'Target_3d_norm', '2024-01-01')
 res_5d = walk_forward_validation(df_pooled, 'Target_5d_norm', '2024-01-01')

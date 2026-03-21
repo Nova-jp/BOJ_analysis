@@ -223,9 +223,16 @@ def summarize_ic(results: pd.DataFrame, recent_n_folds: int = 3,
     }
 
 
-def walk_forward_validation(df, target_col, start_date, test_window_days=90, purge_days=5, return_model=False, num_boost_round=100):
+def _walk_forward_core(df, target_col, start_date, test_window_days=90, purge_days=5, num_boost_round=100):
     """
-    パージ付きウォークフォワード検証。
+    ウォークフォワード検証の共通実装。walk_forward_validation と walk_forward_with_model から呼ばれる。
+
+    Returns:
+        results (list[DataFrame]): フォールドごとの予測結果リスト
+        last_model: 最終フォールドのモデル
+        last_X_test, last_y_test, last_X_train: 最終フォールドのデータ
+
+    注意: 5d ターゲットでは末尾5日分の OOS 行が生成されない（shift(-5) によるNaN除外）。
     """
     X, y, dates, m_idx = get_features_and_target(df, target_col)
 
@@ -240,7 +247,6 @@ def walk_forward_validation(df, target_col, start_date, test_window_days=90, pur
         test_start_idx = 1
 
     results = []
-
     current_idx = test_start_idx
     fold = 0
     last_model = None
@@ -280,12 +286,12 @@ def walk_forward_validation(df, target_col, start_date, test_window_days=90, pur
         train_metrics = calculate_metrics(y_train, train_preds)
 
         fold_res = pd.DataFrame({
-            'Fold':         fold,
-            'Date':         test_dates_fold,
+            'Fold':          fold,
+            'Date':          test_dates_fold,
             'Meeting_Index': test_m_idx_fold,
-            'Actual':       y_test,
-            'Pred':         test_preds,
-            'Train_IC':     train_metrics['IC'],
+            'Actual':        y_test,
+            'Pred':          test_preds,
+            'Train_IC':      train_metrics['IC'],
         })
         results.append(fold_res)
 
@@ -302,12 +308,40 @@ def walk_forward_validation(df, target_col, start_date, test_window_days=90, pur
             break
         current_idx = next_idx
 
-    if not results:
-        if return_model:
-            return pd.DataFrame(), None, None, None, None
-        return pd.DataFrame()
+    return results, last_model, last_X_test, last_y_test, last_X_train
 
-    final_results = pd.concat(results).reset_index(drop=True)
-    if return_model:
-        return final_results, last_model, last_X_test, last_y_test, last_X_train
-    return final_results
+
+def walk_forward_validation(df, target_col, start_date, test_window_days=90, purge_days=5, num_boost_round=100):
+    """
+    パージ付きウォークフォワード検証。OOS 予測結果 DataFrame を返す。
+
+    Returns:
+        pd.DataFrame: 列 [Fold, Date, Meeting_Index, Actual, Pred, Train_IC]
+    """
+    results, _, _, _, _ = _walk_forward_core(
+        df, target_col, start_date, test_window_days, purge_days, num_boost_round
+    )
+    if not results:
+        return pd.DataFrame()
+    return pd.concat(results).reset_index(drop=True)
+
+
+def walk_forward_with_model(df, target_col, start_date, test_window_days=90, purge_days=5, num_boost_round=100):
+    """
+    パージ付きウォークフォワード検証。OOS 結果に加えて最終フォールドのモデルとデータを返す。
+
+    特徴量重要度の確認やシグナル生成など、最終フォールドのモデルが必要な場合に使用する。
+
+    Returns:
+        results    (pd.DataFrame): OOS 予測結果
+        last_model               : 最終フォールドの LightGBM モデル
+        last_X_test (pd.DataFrame): 最終フォールドのテスト特徴量
+        last_y_test (pd.Series)  : 最終フォールドのテストターゲット
+        last_X_train (pd.DataFrame): 最終フォールドの訓練特徴量
+    """
+    results, last_model, last_X_test, last_y_test, last_X_train = _walk_forward_core(
+        df, target_col, start_date, test_window_days, purge_days, num_boost_round
+    )
+    if not results:
+        return pd.DataFrame(), None, None, None, None
+    return pd.concat(results).reset_index(drop=True), last_model, last_X_test, last_y_test, last_X_train

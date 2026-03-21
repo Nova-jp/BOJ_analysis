@@ -61,17 +61,7 @@ def generate_features(
         if col in feat_df.columns:
             feat_df[f'{col}_frac_diff'] = frac_diff(feat_df[col], d=d, window=window)
 
-    # 4. Days_to_MPM: processing.py で計算済みの場合はそのまま使う
-    if 'Days_to_MPM' not in feat_df.columns:
-        meeting_dates = sorted(feat_df.loc[feat_df['Is_Meeting_Day'] == 1, 'Date'].unique())
-
-        def get_days_to_mpm(date):
-            future = [m for m in meeting_dates if m >= date]
-            return (future[0] - date).days if future else np.nan
-
-        feat_df['Days_to_MPM'] = feat_df['Date'].map(
-            {d: get_days_to_mpm(d) for d in feat_df['Date'].unique()}
-        )
+    # Days_to_MPM は processing.py の load_and_clean_data が常に付与する
 
     # --- Exp-A: 曜日の円環エンコーディング ---
     if add_weekday_cyclic:
