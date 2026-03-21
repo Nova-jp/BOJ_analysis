@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
 def frac_diff(series, d, window=50):
     """
@@ -7,8 +8,8 @@ def frac_diff(series, d, window=50):
     w_k = (-1)^k * C(d, k)
     windowサイズ分の過去データが揃わない先頭行はNaNとする。
 
-    rolling().apply() を使わず numpy ループで実装することで
-    Python 関数呼び出しのオーバーヘッドを回避している。
+    sliding_window_view で (n-window+1, window) の行列を作り、
+    重みベクトルとの行列積で全ウィンドウを一括計算する（純Pythonループなし）。
     """
     weights = [1.0]
     for k in range(1, window):
@@ -16,12 +17,17 @@ def frac_diff(series, d, window=50):
     weights = np.array(weights[::-1])  # 過去から現在への重み
 
     arr = series.to_numpy(dtype=float)
-    result = np.full(len(arr), np.nan)
-    for i in range(window - 1, len(arr)):
-        window_data = arr[i - window + 1:i + 1]
-        if np.isnan(window_data).any():
-            continue
-        result[i] = np.dot(window_data, weights)
+    n = len(arr)
+    result = np.full(n, np.nan)
+
+    if n < window:
+        return pd.Series(result, index=series.index)
+
+    # shape: (n - window + 1, window) のビュー（コピーなし）
+    windows = sliding_window_view(arr, window_shape=window)
+    dots = windows @ weights                         # 全ウィンドウを一括計算
+    dots[np.isnan(windows).any(axis=1)] = np.nan    # NaN含むウィンドウはNaNに戻す
+    result[window - 1:] = dots
 
     return pd.Series(result, index=series.index)
 
