@@ -80,8 +80,62 @@
 
 | 実験ID | 内容 | 設計書 | ステータス |
 |--------|------|--------|----------|
+| **Exp-BFly-A** | **[RV Butterfly] Fly_Level削除 → B2_level〜B7_level（全6本水準）追加** | `designs/pending/exp_bfly_a_all_b_levels.md` | **Gemini 実行待ち** |
 | Exp-DXY（再） | DXY_frac_diff 追加（src/ 3箇所修正済み） | `designs/pending/exp_abc_dxy_spot.md` | **Gemini 実行待ち** |
 | Exp-A（確認） | 曜日 sin/cos のフォールド別IC確認 | 同上 | Gemini 確認待ち |
+| Exp-SpotSpread | S{n}=M{n}-T12 の変化予測（新カーブモデル） | `designs/archives/exp_spot_spread_model.md` | **不採用**（2026-03-21） |
+| Exp-CurveDir | M2-M4・M2-M5 単体方向予測（プーリングなし） | `designs/archives/exp_curve_direction_model.md` | **基礎確認**（v2に移行） |
+| Exp-CurveDirV2 | Adjacent vs AllPair プーリング比較 | `designs/archives/exp_curve_direction_v2.md` | **Adjacent採用・M2-M5主軸**（2026-03-22） |
+
+### Exp-SpotSpread（2026-03-21）
+
+ノートブック: `notebooks/exp_spot_spread_model_executed.ipynb`
+
+| ホライズン | Global IC | CS IC | Gap |
+|-----------|----------|-------|-----|
+| 3d | 0.2475 | **0.0414** | — |
+| 5d | 0.3964 | **0.0909** | — |
+
+**不採用理由**: CS IC が採用基準（3d ≥ 0.21）を大幅に下回った。
+
+根本的な失敗要因: `ΔS{n} = ΔM{n} - ΔT12` において T12 は全 S1〜S8 の共通成分であり、
+T12 の動きがモデルの Global IC に寄与する一方、CS IC（日次クロスセクションのランク予測）は
+「S1〜S8 が同日に一斉に同方向へ動く」ために完全にノイズになる。
+RV Curve（隣接差分）や RV Butterfly（バタフライ）が CS IC で高くなれるのは、
+隣接差分・バタフライ変換によって共通の T12/全体方向成分を打ち消しているためであり、
+T12 を基準点にした Spot Spread はその性質を持たない。
+
+特徴量重要度（5d）Top5: S4_frac_diff, Days_to_MPM, T12_spread, Spread_Level, S5_frac_diff
+
+---
+
+### Exp-CurveDirV2（2026-03-22）
+
+ノートブック: `notebooks/archives/exp_curve_direction_v2_executed.ipynb`
+
+**比較: Model A（Adjacent C1-C7, 7系列）vs Model B（AllPair 全28系列）**
+
+| モデル | Global IC 3d | Train IC 3d | Gap 3d | Global IC 5d | Train IC 5d | Gap 5d |
+|--------|-------------|-------------|--------|-------------|-------------|--------|
+| Model A (Adjacent) | 0.2228 | 0.4681 | 0.2453 | 0.2717 | 0.5257 | 0.2540 |
+| Model B (AllPair)  | 0.2022 | 0.5141 | 0.3119 | 0.1825 | 0.5559 | 0.3735 |
+
+**M2-M5 個別評価（採用スパン）:**
+
+| モデル | IC 3d | Dir 3d | Dir_Large 3d | IC 5d | Dir 5d | Dir_Large 5d |
+|--------|-------|--------|--------------|-------|--------|--------------|
+| Model A | 0.2604 | 0.5421 | 0.6667 | **0.3297** | **0.5986** | 0.6887 |
+| Model B | 0.1853 | 0.5467 | 0.6569 | 0.2263 | 0.5915 | 0.6132 |
+
+**採用: Model A（Adjacent、既存 `pool_curve_data` と同一実装）、主軸スパン M2-M5**
+
+採用理由:
+- Model A が全指標で Model B を上回る
+- Model B は Gap が大きく（3d=0.31, 5d=0.37）過学習が顕著。28系列の高相関によりノイズを反復学習
+- M2-M5 は M2-M4 より IC・方向的中率ともに高い（5d IC: 0.330 vs 0.318）
+- 既存 `pooling_curve.py` を流用可能。新規 src/ モジュール不要
+
+---
 
 ### 修正済みの src/ バグ（2026-03-21）
 DXY が `features.py`・`pooling.py`・`modeling.py` の全3箇所で特徴量から漏れていた。
