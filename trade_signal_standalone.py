@@ -552,10 +552,31 @@ print(f'OOS: {res_fly_3d["Date"].min().date()} -> {res_fly_3d["Date"].max().date
 # =============================================================================
 # 3. Signal date & signal functions
 # =============================================================================
-_common = (set(res_fly_3d['Date'].unique()) & set(res_fly_5d['Date'].unique())
-           & set(res_crv_3d['Date'].unique()) & set(res_crv_5d['Date'].unique())
-           & set(res_out_3d['Date'].unique()) & set(res_out_5d['Date'].unique()))
-SIGNAL_DATE = max(_common)
+
+def _predict_for_signal(df, model, target_col, signal_date):
+    """最終フォールドモデルを使って signal_date の特徴量から予測を生成する。
+    ターゲット（shift -h）が NaN の最新日でも特徴量が揃っていれば予測可能。
+    OOS 結果（res_*）は過去の精度評価用。このシグナル予測は「今日から将来を予測」用。
+    """
+    feature_cols = [c for c in df.columns
+                    if c not in NON_FEATURE_COLS and c != target_col]
+    rows = df[df['Date'] == signal_date].copy()
+    if rows.empty:
+        return pd.DataFrame()
+    X     = rows[feature_cols]
+    valid = X.notna().all(axis=1)
+    rows  = rows[valid].copy()
+    X     = X[valid]
+    if rows.empty:
+        return pd.DataFrame()
+    rows['Pred']   = model.predict(X)
+    rows['Actual'] = np.nan
+    return rows.reset_index(drop=True)
+
+
+# シグナル基準日: 全モデルで特徴量が揃っている最新日
+# （OOS 結果の最新日ではなく、実際に予測したい日付）
+SIGNAL_DATE = min(df_fly['Date'].max(), df_crv['Date'].max(), df_out['Date'].max())
 print(f'Signal date  : {SIGNAL_DATE.date()}', flush=True)
 
 
@@ -614,9 +635,17 @@ def _m4_signal(r3, r5, date):
     }
 
 
-fly_sig  = _fly_signal(res_fly_3d, res_fly_5d, SIGNAL_DATE)
-m2m5_sig = _m2m5_signal(res_crv_3d, res_crv_5d, SIGNAL_DATE)
-m4_sig   = _m4_signal(res_out_3d, res_out_5d, SIGNAL_DATE)
+# 最終フォールドモデルを SIGNAL_DATE の特徴量に直接適用してシグナルを生成
+sig_fly_3d = _predict_for_signal(df_fly, mdl_fly_3d, 'Target_3d_norm', SIGNAL_DATE)
+sig_fly_5d = _predict_for_signal(df_fly, mdl_fly_5d, 'Target_5d_norm', SIGNAL_DATE)
+sig_crv_3d = _predict_for_signal(df_crv, mdl_crv_3d, 'Target_3d_norm', SIGNAL_DATE)
+sig_crv_5d = _predict_for_signal(df_crv, mdl_crv_5d, 'Target_5d_norm', SIGNAL_DATE)
+sig_out_3d = _predict_for_signal(df_out, mdl_out_3d, 'Target_3d_norm', SIGNAL_DATE)
+sig_out_5d = _predict_for_signal(df_out, mdl_out_5d, 'Target_5d_norm', SIGNAL_DATE)
+
+fly_sig  = _fly_signal(sig_fly_3d, sig_fly_5d, SIGNAL_DATE)
+m2m5_sig = _m2m5_signal(sig_crv_3d, sig_crv_5d, SIGNAL_DATE)
+m4_sig   = _m4_signal(sig_out_3d, sig_out_5d, SIGNAL_DATE)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
