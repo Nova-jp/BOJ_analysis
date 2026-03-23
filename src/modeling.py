@@ -40,8 +40,8 @@ def get_features_and_target(df, target_col):
     # Meeting_Index は feature_cols に含まれる → 重複追加しない
     data = df[feature_cols + [target_col, 'Date', 'is_post_mpm']].copy()
 
-    # MPM直後およびターゲット/特徴量のNaNを除外
-    data = data[data['is_post_mpm'] == 0]
+    # ターゲット/特徴量のNaNを除外
+    # 注意: MPM直後5日間の除外は行わない（post-MPM期間のCS ICが高いため、2026-03-23にModel Bをメインに昇格）
     data = data.dropna(subset=feature_cols + [target_col])
 
     return data[feature_cols], data[target_col], data['Date'], data['Meeting_Index']

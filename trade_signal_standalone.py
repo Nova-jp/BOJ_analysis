@@ -350,7 +350,7 @@ BOJ_MEETING_INDICES = set(range(1, 9))
 def get_features_and_target(df, target_col):
     feature_cols = [c for c in df.columns if c not in NON_FEATURE_COLS and c != target_col]
     data = df[feature_cols + [target_col, 'Date', 'is_post_mpm']].copy()
-    data = data[data['is_post_mpm'] == 0]
+    # post-MPM rows are included (Model B, 2026-03-23)
     data = data.dropna(subset=feature_cols + [target_col])
     return data[feature_cols], data[target_col], data['Date'], data['Meeting_Index']
 
@@ -516,10 +516,6 @@ df_rv  = generate_rv_features(df_raw)
 df_fly = pool_butterfly_data(df_rv)
 df_crv = pool_curve_data(df_rv)
 df_out = pool_boj_data(generate_features(df_raw), meeting_dates)
-
-# Model B: include post-MPM rows in both training and testing
-for _df in [df_fly, df_crv, df_out]:
-    _df['is_post_mpm'] = 0
 
 print(f'Data through : {df_raw["Date"].max().date()}')
 print(f'Fly {df_fly.shape}  Crv {df_crv.shape}  Out {df_out.shape}')
