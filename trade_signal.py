@@ -104,20 +104,35 @@ def _predict_for_signal(df, model, target_col, signal_date):
 
     ターゲット（shift -h）が NaN の最新日でも特徴量が揃っていれば予測可能。
     OOS 結果（res_*）は過去の精度評価用。このシグナル予測は「今日から将来を予測」用。
+
+    注意: Actual = NaN（未来の実績値は存在しない）。
+         _m2m5_signal が Actual_Xd_bp を返すが、現在の表示コードはこれを参照しない。
+         将来 Actual_Xd_bp を表示に使う場合は NaN 処理が必要。
     """
-    feature_cols = [c for c in df.columns
-                    if c not in NON_FEATURE_COLS and c != target_col]
     rows = df[df['Date'] == signal_date].copy()
     if rows.empty:
-        return pd.DataFrame()
-    X     = rows[feature_cols]
+        raise ValueError(f'signal_date {signal_date.date()} が df に存在しない')
+
+    # model.feature_name() で訓練時と完全に同じ列セット・列順を保証
+    # NON_FEATURE_COLS の変更や df への列追加があっても列不一致が生じない
+    feature_cols = model.feature_name()
+    X = rows[feature_cols]
+
+    nan_features = X.columns[X.isnull().any()].tolist()
     valid = X.notna().all(axis=1)
-    rows  = rows[valid].copy()
-    X     = X[valid]
-    if rows.empty:
-        return pd.DataFrame()
+    if not valid.any():
+        raise ValueError(
+            f'signal_date {signal_date.date()} の全行に NaN 特徴量あり: {nan_features}\n'
+            f'  対処: BOJ_meeting_history.csv に次回会合日程が登録されているか確認'
+        )
+    if not valid.all():
+        print(f'[WARNING] signal_date {signal_date.date()}: {(~valid).sum()} 行を'
+              f' NaN 特徴量で除外 ({nan_features})', flush=True)
+
+    rows = rows[valid].copy()
+    X    = X[valid]
     rows['Pred']   = model.predict(X)
-    rows['Actual'] = np.nan
+    rows['Actual'] = np.nan  # 推論モード: 未来の実績値は存在しない
     return rows.reset_index(drop=True)
 
 
@@ -190,8 +205,11 @@ sig_fly_3d = _predict_for_signal(df_fly, mdl_fly_3d, 'Target_3d_norm', SIGNAL_DA
 sig_fly_5d = _predict_for_signal(df_fly, mdl_fly_5d, 'Target_5d_norm', SIGNAL_DATE)
 sig_crv_3d = _predict_for_signal(df_crv, mdl_crv_3d, 'Target_3d_norm', SIGNAL_DATE)
 sig_crv_5d = _predict_for_signal(df_crv, mdl_crv_5d, 'Target_5d_norm', SIGNAL_DATE)
-sig_out_3d = _predict_for_signal(df_out, mdl_out_3d, 'Target_3d_norm', SIGNAL_DATE)
-sig_out_5d = _predict_for_signal(df_out, mdl_out_5d, 'Target_5d_norm', SIGNAL_DATE)
+# Outright モデルはテナーOIS行（T12/T18/T24）を除外してから渡す
+# テナー行は Absolute_Meeting_ID = NaN（設計上の意図的な欠損）なので WARNING を抑制するため
+_df_out_boj = df_out[df_out['Is_Tenor_OIS'] == 0]
+sig_out_3d = _predict_for_signal(_df_out_boj, mdl_out_3d, 'Target_3d_norm', SIGNAL_DATE)
+sig_out_5d = _predict_for_signal(_df_out_boj, mdl_out_5d, 'Target_5d_norm', SIGNAL_DATE)
 
 fly_sig  = _fly_signal(sig_fly_3d, sig_fly_5d, SIGNAL_DATE)
 m2m5_sig = _m2m5_signal(sig_crv_3d, sig_crv_5d, SIGNAL_DATE)
