@@ -9,13 +9,13 @@ def generate_rv_features(df, d=0.4, window=50):
 
     入力: load_and_clean_data() の出力（M1-M8, Actual_Policy_Rate, 外部指標 等）
     出力: 以下を追加した DataFrame
-        - M{n}_spread   : M{n} - Actual_Policy_Rate（n=1..8）
-        - C{n}          : M{n}_spread - M{n+1}_spread（n=1..7）隣接差分
-        - C{n}_frac_diff: 上記の分数階差
-        - B{n}          : 2*M{n}_spread - M{n-1}_spread - M{n+1}_spread（n=2..7）バタフライ
-        - B{n}_frac_diff: 上記の分数階差
-        - M1_frac_diff  : M1_spread の分数階差（アンカー用）
-        - Slope_M1M8    : M1_spread - M8_spread（バタフライモデルのコンテキスト用）
+        - M{n}_spread       : M{n} - Actual_Policy_Rate（n=1..8）
+        - C{n}              : M{n}_spread - M{n+1}_spread（n=1..7）隣接差分
+        - C{n}_frac_diff    : 上記の分数階差
+        - B{n}              : 2*M{n}_spread - M{n-1}_spread - M{n+1}_spread（n=2..7）バタフライ
+        - B{n}_frac_diff    : 上記の分数階差
+        - M1_frac_diff      : M1_spread の分数階差（アンカー用）
+        - Slope_M1M8        : M1_spread - M8_spread（バタフライモデルのコンテキスト用）
         - Slope_M1M8_frac_diff
         - USDJPY/JGB_Future/Nikkei225/DXY _frac_diff: 外部指標
 
